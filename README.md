@@ -1,13 +1,11 @@
-# Session: Simulating Attacks and Wazuh Filtering
+# Windows VM Capture Agent Setup
 
 > Built and documented in an isolated home lab environment that I own.
 > Documentation generated with LabScribe and reviewed by hand.
 
 ## 1. Overview
 
-This session focused on generating an SSH brute-force attack against the SIEM/Ubuntu host and confirming that the resulting authentication events were captured for analysis. Before the attack could be reviewed, Splunk on `soc-lab-ubuntu` was found stopped and had to be restarted. A brute-force run originating from `192.168.192.30` (the attacker box) was then observed in `/var/log/auth.log`, showing multiple failed SSH password attempts against user `socadmin` and at least one accepted login. Per the session note, the Hydra attack was successful and logs were received; rule authoring/filtering is deferred to the next session.
-
-> Note: the lab template records the subnet as `10.10.10.0/24`, but the captured transcript shows activity on `192.168.192.x` (attacker `192.168.192.30`). IPs below reflect what was actually observed in the transcript.
+This session covered installing and configuring the Splunk Universal Forwarder on a Windows workstation (`WINDOWSBOX`) to forward Security, System, and Sysmon event logs to the lab's Splunk SIEM. The session included troubleshooting a failed Sysmon channel subscription, verifying forwarder input status, and confirming network reachability by reviewing interface configuration and adding an ICMP firewall allow rule for ping testing.
 
 | Host | OS | Role | IP |
 |---|---|---|---|
@@ -15,6 +13,8 @@ This session focused on generating an SSH brute-force attack against the SIEM/Ub
 | WKS01 | Windows 11 | Domain-joined workstation | 10.10.10.20 |
 | SIEM01 | Ubuntu + Splunk | SIEM / log collector | 10.10.10.30 |
 | KALI01 | Kali Linux | Attacker box | 10.10.10.40 |
+
+*Note: This session's transcripts reference host `WINDOWSBOX`, whose observed IPs (`10.0.2.15` NAT interface, `192.168.192.20` host-only interface) do not match the `10.10.10.0/24` lab addressing scheme above. It appears to be the same machine referred to as WKS01 elsewhere in the lab, but this is not confirmed by the transcript.*
 
 ## 2. Network Diagram
 
@@ -35,56 +35,42 @@ graph TB
 
 ## 3. Build Steps
 
-### SIEM01 (`soc-lab-ubuntu`, Ubuntu + Splunk)
+### WINDOWSBOX (Splunk Universal Forwarder / log source)
 
-1. **Checked Splunk service status.** The first attempt (`sudo splunk status`) failed because `splunk` is not on the system `PATH`; the full path `/opt/splunk/bin/splunk status` was used instead. Status reported `splunkd 3791 was not running`, and stale helper processes/PID file were cleaned up. This matters because no detection or search is possible while the SIEM daemon is down (see `VirtualBoxVM_VsrFQQ8cGt.png`).
+No screenshots were provided for this session — none appear in the raw material.
 
-2. **Restarted Splunk.** `sudo /opt/splunk/bin/splunk restart` emitted a deprecation warning about running as root, so the restart was reissued with `--run-as-root`. Preliminary checks passed (ports 8000/8089/8065/8191 open, indexes validated, installed files intact against the `splunk-10.4.2` manifest), new certs were generated, and the daemon came up. This confirms the Splunk web interface (`https://soc-lab-ubuntu:8000`) is available for review (see `VirtualBoxVM_pAzIVB5ApD.png`).
+- **2026-08-05 11:47** — Ran the `splunkforwarder-10.4.2` MSI from the Downloads folder to install the Splunk Universal Forwarder, then opened `outputs.conf` in Notepad to point the forwarder at the SIEM's receiving port. This establishes the log-shipping pipeline from the Windows workstation to Splunk.
+- Added three monitor stanzas via `splunk.exe add monitor`: `WinEventLog:Security`, `WinEventLog:System`, and `WinEventLog:Microsoft-Windows-Sysmon/Operational`. These are the core event sources needed for endpoint detection (authentication events, system health, and Sysmon process/network telemetry).
+- All three `add monitor` commands failed with `Parameter name: Path must be a file or directory.` — this is expected/benign behavior for WinEventLog monitor stanzas added via CLI on this Splunk version; the stanzas still get written to config. Followed up by manually editing `inputs.conf` directly in Notepad to define the WinEventLog inputs.
+- Restarted the `SplunkForwarder` service to apply the new `inputs.conf`.
+- Verified configuration with `splunk.exe list monitor` (had to re-authenticate — session had expired) and `splunk.exe list inputstatus`, confirming the `Security` and `System` monitor consumed WinEventLog data via `splunk-winevtlog.exe` (`total bytes = 21933400`), while `Microsoft-Windows-Sysmon/Operational` did not appear as an active input.
+- **2026-08-05 12:25** — Confirmed Sysmon's operational log exists (`Get-WinEvent -ListLog "*Sysmon*"`) and is enabled (`wevtutil gl`). Checked the forwarder service account (`SplunkForwarder` running as `NT SERVICE\SplunkForwarder`) and searched `splunkd.log` for Sysmon-related errors, finding a channel subscription failure (`errorCode=5`, access denied) when the forwarder tried to subscribe to the Sysmon channel. Restarted the service again as a first remediation attempt; the same error persisted in the log afterward, indicating the fix was not yet applied (see Troubleshooting Log).
+- **2026-08-06 01:17** — Ran `ipconfig` to confirm network interfaces: a NAT adapter (`10.0.2.15`) and a host-only/second adapter (`192.168.192.20`). Added an inbound firewall rule (`New-NetFirewallRule -DisplayName "Allow ICMPv4-In"`) to permit ICMPv4 echo requests, enabling connectivity testing (ping) from other lab hosts such as the SIEM or DC for reachability verification.
 
-3. **Verified Splunk was running.** A follow-up `splunk status` reported `splunkd is running (PID: 6626)` with helper processes active — confirming the SIEM was ready to ingest/search before running the attack.
-
-4. **Opened the SIEM web UI in the browser** to review incoming events / detection results — a browser capture was taken during this window (see `chrome_o8drOyn4Cf.png`).
-
-5. **Reviewed raw authentication logs.** `sudo tail -50 /var/log/auth.log` was used to inspect SSH activity directly on the host. The tail showed the brute-force burst from `192.168.192.30` against `socadmin`, including repeated `Failed password` entries, one `Accepted password`, and the SSH server activating a rate-limit penalty (`srclimit_penalise`). This is the source-side evidence that the attack was recorded (see `VirtualBoxVM_PQnGIuQEHU.png`).
-
-> Per the session note, the events were also observed on the Wazuh side ("Wazuh received logs, Ubuntu detected on its side"). The captured transcript itself only shows Splunk and raw `auth.log`; the Wazuh detection was noted but not captured in the terminal output.
-
-### DC01 (Windows Server 2022)
+### DC01, SIEM01, KALI01
 
 *No activity captured for this section yet.*
-
-### WKS01 (Windows 11)
-
-*No activity captured for this section yet.*
-
-### KALI01 (Kali Linux)
-
-*No terminal activity captured from the attacker box this session; the Hydra brute force was observed only from the SIEM01 side (source `192.168.192.30`).*
 
 ## 4. Troubleshooting Log
 
 | Issue | Cause | Fix |
 |---|---|---|
-| `sudo splunk status` → `sudo: 'splunk': command not found` | Splunk binary is not on the system `PATH` | Invoked Splunk using its full path, `/opt/splunk/bin/splunk` |
-| `splunkd 3791 was not running`; stale PID file present | Splunk daemon had stopped; leftover PID/helper state from the prior run | Splunk's own start routine stopped stale helpers and removed the stale PID file, then a restart was issued |
-| Restart warning: "Running Splunk Enterprise as root is deprecated…" | `splunk restart` was run under `sudo` (as root) without the expected flag | Re-ran the restart with `--run-as-root` to acknowledge and proceed |
-| `WARNING: Server Certificate Hostname Validation is disabled` during web-server startup | `server.conf [sslConfig] cliVerifyServerName` is disabled (default/lab config) | Left as-is for the lab; noted as expected behavior, no functional impact |
-| `mongod-8.0 … failed to open directory … cyrus-sasl-mongo-openssl3 … error: No such file or directory` | KV store (MongoDB) looked for a SASL plugin directory that does not exist in this build path | Non-fatal warning during startup; Splunk still reached running state (`splunkd is running (PID: 6626)`), so no action was required this session |
+| `splunk.exe add monitor` returned `Parameter name: Path must be a file or directory.` for all three WinEventLog monitors | The Universal Forwarder CLI's `add monitor` command expects a filesystem path, not a WinEventLog channel name — WinEventLog inputs need to be defined as stanzas in `inputs.conf` rather than added via this CLI syntax | Manually edited `inputs.conf` in Notepad to add the `[WinEventLog://...]` stanzas directly, then restarted the `SplunkForwarder` service to apply them |
+| `splunk.exe list monitor` returned `Your session is invalid. Please login.` | CLI session token had expired between commands | Re-authenticated with `admin2` / `[REDACTED]` when prompted |
+| Sysmon events not forwarding; `splunkd.log` showed `WinEventLogChannel::subscribeToEvtChannel: Could not subscribe to Windows Event Log channel 'Microsoft-Windows-Sysmon/Operational'` and `Init failed... errorCode=5` | Error code 5 is Windows "Access Denied" — the `SplunkForwarder` service account (`NT SERVICE\SplunkForwarder`) likely lacks permission to read the custom Sysmon operational channel, which by default restricts access to specific SIDs (per the `wevtutil gl` channelAccess output) | Restarted the `SplunkForwarder` service as an initial attempt; the same error still appeared in `splunkd.log` afterward, so the underlying permissions issue was **not yet resolved** as of end of session — likely needs the service account added to the Sysmon channel's `channelAccess` ACL or added to the "Event Log Readers" group |
+| `ip config` command not recognized | Typed a Linux-style command (`ip config`) on Windows instead of the correct PowerShell/cmd equivalent | Re-ran with the correct Windows command, `ipconfig` |
 
 ## 5. Attack & Detection Scenarios
 
-| Scenario | Attack (KALI01) | Detection (SIEM01) | Status |
-|---|---|---|---|
-| SSH brute force against `socadmin` | Brute-force login attempts from `192.168.192.30` (appears to be a Hydra run per session note) | `/var/log/auth.log` shows multiple `Failed password` / `pam_unix(sshd:auth): authentication failure` entries and `srclimit_penalise` rate-limiting; one `Accepted password` login also recorded. Logs received by Splunk/Wazuh per note. | Attack successful (valid credential accepted); events captured. Detection rule authoring pending next session. |
+*No activity captured for this section yet.*
 
 ## 6. Lessons Learned
 
-- Splunk was down at the start of the session — verify `splunkd` is running (via `/opt/splunk/bin/splunk status`) *before* generating attack traffic, or events risk being missed.
-- Use the full binary path `/opt/splunk/bin/splunk`; the `splunk` command is not on `PATH`.
-- Running Splunk as root now requires `--run-as-root` and is deprecated — worth revisiting to run Splunk under a dedicated service account.
-- SSH already applied a rate-limit penalty (`srclimit_penalise`) against the brute-force source, which itself is a useful detection signal alongside the failed-password events.
-- The brute force succeeded (an `Accepted password` appears), which is a reminder to harden `socadmin` credentials / SSH auth in the lab.
+- WinEventLog inputs for the Splunk Universal Forwarder must be added via `inputs.conf` edits, not the `add monitor` CLI syntax, which is designed for file/directory paths.
+- A Sysmon operational channel can be enabled and visible via `wevtutil`/`Get-WinEvent` while still being inaccessible to the Splunk forwarder service account due to channel ACL restrictions (errorCode=5) — the fix for this was still in progress at session end and needs to be revisited.
+- Restarting the forwarder service alone did not resolve the Sysmon subscription failure, confirming the root cause is a permissions/ACL issue rather than a stale service state.
+- Cross-checking `ipconfig` output early helped confirm which interface (NAT vs. host-only) the box uses for lab traffic, which will matter for firewall rules and Splunk output routing.
 
 ## 7. Changelog
 
-- **2026-08-06** — Restarted Splunk on SIEM01 after finding it stopped; ran an SSH brute-force attack from `192.168.192.30` against `socadmin` and confirmed the attempts were captured in `/var/log/auth.log` and received by the SIEM. Detection rule writing deferred to next session. Screenshots: `VirtualBoxVM_VsrFQQ8cGt.png`, `VirtualBoxVM_pAzIVB5ApD.png`, `chrome_o8drOyn4Cf.png`, `VirtualBoxVM_PQnGIuQEHU.png`.
+- **2026-08-05 → 2026-08-06**: Installed Splunk Universal Forwarder on WINDOWSBOX; configured Security/System/Sysmon WinEventLog monitors; diagnosed and partially addressed a Sysmon channel subscription failure (errorCode=5, unresolved); verified network interfaces and added an inbound ICMPv4 firewall rule for connectivity testing.
