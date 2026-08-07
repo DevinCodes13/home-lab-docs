@@ -1,11 +1,13 @@
-# Home SOC Lab — Session: Splunk Installation & HTTPS Setup
+# Session: Simulating Attacks and Wazuh Filtering
 
 > Built and documented in an isolated home lab environment that I own.
 > Documentation generated with LabScribe and reviewed by hand.
 
 ## 1. Overview
 
-This session (2026-08-05, 00:53–12:23 UTC) was spent bringing the Ubuntu SIEM host (`soc-lab-ubuntu`) online as a Wazuh manager, enrolling the Windows 11 lab VM as agent `001` (`WIN11-LAB`), and re-addressing the host-only lab interface so manager and agent shared a routable lab subnet. Most of the captured work is Wazuh manager service verification, listener checks on TCP 1514/1515, agent registration via `manage_agents`, and a netplan change that gave `enp0s8` a static address of `192.168.192.10/24`. The user's notes record two milestones: Windows logs arriving in Wazuh at 02:29, and Splunk successfully receiving forwarded logs at 12:20. The Splunk installation and HTTPS work referenced in the session title is only evidenced by the browser screenshots and those notes — no Splunk terminal output was captured, so that portion is documented at a high level only. The third transcript (`2026-08-05_1627_soc-lab-ubuntu.txt`) is empty.
+This session focused on generating an SSH brute-force attack against the SIEM/Ubuntu host and confirming that the resulting authentication events were captured for analysis. Before the attack could be reviewed, Splunk on `soc-lab-ubuntu` was found stopped and had to be restarted. A brute-force run originating from `192.168.192.30` (the attacker box) was then observed in `/var/log/auth.log`, showing multiple failed SSH password attempts against user `socadmin` and at least one accepted login. Per the session note, the Hydra attack was successful and logs were received; rule authoring/filtering is deferred to the next session.
+
+> Note: the lab template records the subnet as `10.10.10.0/24`, but the captured transcript shows activity on `192.168.192.x` (attacker `192.168.192.30`). IPs below reflect what was actually observed in the transcript.
 
 | Host | OS | Role | IP |
 |---|---|---|---|
@@ -13,14 +15,6 @@ This session (2026-08-05, 00:53–12:23 UTC) was spent bringing the Ubuntu SIEM 
 | WKS01 | Windows 11 | Domain-joined workstation | 10.10.10.20 |
 | SIEM01 | Ubuntu + Splunk | SIEM / log collector | 10.10.10.30 |
 | KALI01 | Kali Linux | Attacker box | 10.10.10.40 |
-
-**Addressing actually observed in this session** (recorded separately, since it differs from the canonical table above):
-
-| Host (as seen) | Interface | Address | Notes |
-|---|---|---|---|
-| `soc-lab-ubuntu` (Wazuh manager / SIEM) | `enp0s3` | `10.0.2.15/24` (DHCP, later `10.0.3.15/24` early in the session) | NAT-style uplink; address changed between transcripts |
-| `soc-lab-ubuntu` | `enp0s8` | `192.168.192.10/24` (static, set this session) | Lab-facing / host-only interface |
-| `WIN11-LAB` (Wazuh agent 001) | — | Registered as `10.0.3.15`, later seen connecting from `192.168.192.20` | Address mismatch caused the rejected-message errors below |
 
 ## 2. Network Diagram
 
@@ -41,114 +35,56 @@ graph TB
 
 ## 3. Build Steps
 
-### SIEM01 — `soc-lab-ubuntu` (Ubuntu + Wazuh manager, later Splunk)
+### SIEM01 (`soc-lab-ubuntu`, Ubuntu + Splunk)
 
-**VirtualBox / VM preparation (early session, ~01:00–02:00)**
-Two VirtualBox screenshots were taken before any terminal capture began; based on timing they appear to cover VM/adapter setup for the lab VMs, which is what made the later host-only addressing work possible (see `VirtualBoxVM_PhpVVBxto0.png`, `VirtualBoxVM_OzrjpDAivu.png`). No transcript exists for this window, so the exact changes are not documented.
+1. **Checked Splunk service status.** The first attempt (`sudo splunk status`) failed because `splunk` is not on the system `PATH`; the full path `/opt/splunk/bin/splunk status` was used instead. Status reported `splunkd 3791 was not running`, and stale helper processes/PID file were cleaned up. This matters because no detection or search is possible while the SIEM daemon is down (see `VirtualBoxVM_VsrFQQ8cGt.png`).
 
-**Wazuh manager service verification (03:56–03:58)**
-Restarted and inspected `wazuh-manager`. The unit came up `active (running)` with all expected daemons present (`wazuh-authd`, `wazuh-remoted`, `wazuh-analysisd`, `wazuh-syscheckd`, `wazuh-logcollector`, `wazuh-monitord`, `wazuh-modulesd`, `wazuh-db`, `wazuh-execd`, plus the API workers). Confirming the full daemon set matters because agent enrollment needs `wazuh-authd` (1515) and agent traffic needs `wazuh-remoted` (1514) — if either is missing, agents silently fail to report.
+2. **Restarted Splunk.** `sudo /opt/splunk/bin/splunk restart` emitted a deprecation warning about running as root, so the restart was reissued with `--run-as-root`. Preliminary checks passed (ports 8000/8089/8065/8191 open, indexes validated, installed files intact against the `splunk-10.4.2` manifest), new certs were generated, and the daemon came up. This confirms the Splunk web interface (`https://soc-lab-ubuntu:8000`) is available for review (see `VirtualBoxVM_pAzIVB5ApD.png`).
 
-**Version check**
-`/var/ossec/bin/wazuh-control info` reported `WAZUH_VERSION="v4.12.0"`, `WAZUH_REVISION="rc1"`, `WAZUH_TYPE="server"`. Recording the exact build matters when matching agent packages to the manager.
+3. **Verified Splunk was running.** A follow-up `splunk status` reported `splunkd is running (PID: 6626)` with helper processes active — confirming the SIEM was ready to ingest/search before running the attack.
 
-**Firewall / listener checks**
-Added `ufw allow 1514/tcp` and `ufw allow 1515/tcp` ("Rules updated" / "Rules updated (v6)"), then `ufw status` returned `Status: inactive` — so the rules are staged but not enforcing anything yet. `iptables -L -n | grep -E '1514|1515'` returned nothing, confirming no host-level block. Listener state was verified with `ss`:
+4. **Opened the SIEM web UI in the browser** to review incoming events / detection results — a browser capture was taken during this window (see `chrome_o8drOyn4Cf.png`).
 
-```
-tcp LISTEN 0 128 0.0.0.0:1515 users:(("wazuh-authd",pid=3969,fd=3))
-tcp LISTEN 0 128 0.0.0.0:1514 users:(("wazuh-remoted",pid=4041,fd=4))
-```
+5. **Reviewed raw authentication logs.** `sudo tail -50 /var/log/auth.log` was used to inspect SSH activity directly on the host. The tail showed the brute-force burst from `192.168.192.30` against `socadmin`, including repeated `Failed password` entries, one `Accepted password`, and the SSH server activating a rate-limit penalty (`srclimit_penalise`). This is the source-side evidence that the attack was recorded (see `VirtualBoxVM_PQnGIuQEHU.png`).
 
-**Remote block configuration check**
-`grep -A 5 "<remote>" /var/ossec/etc/ossec.conf` confirmed the manager is configured for `secure` connections on port `1514/tcp` with a `queue_size` of `131072`. This is the setting the Windows agent's `ossec.conf` must match.
+> Per the session note, the events were also observed on the Wazuh side ("Wazuh received logs, Ubuntu detected on its side"). The captured transcript itself only shows Splunk and raw `auth.log`; the Wazuh detection was noted but not captured in the terminal output.
 
-**Agent enrollment — `WIN11-LAB` (04:38–04:48)**
-`manage_agents -l` initially reported `** No agent available. You need to add one first.` The agent was then added through the interactive `manage_agents` menu (name `WIN11-LAB`, IP `10.0.3.15`), producing `Agent added with ID 001.` The enrollment key was extracted via the `(E)xtract` option — key value `[REDACTED]`. Manager logs confirm the flow:
-
-```
-2026/08/05 04:48:12 wazuh-authd: INFO: Agent key generated for agent 'WIN11-LAB' (requested locally)
-2026/08/05 04:48:15 wazuh-remoted: INFO: (1409): Authentication file changed. Updating.
-2026/08/05 04:48:15 wazuh-remoted: INFO: (1410): Reading authentication keys file.
-```
-
-A subsequent `manage_agents -l` showed `ID: 001, Name: WIN11-LAB, IP: 10.0.3.15`. This step is the whole point of the manager: without a key pair, `wazuh-remoted` drops the agent's traffic as unknown.
-
-**Static lab addressing on `enp0s8` (06:34–06:45)**
-`ip a` showed `enp0s8` up but with only a link-local IPv6 address — no IPv4 — while `enp0s3` had moved to `10.0.2.15/24`. `/etc/netplan/00-installer-config.yaml` was edited in `nano` to add an `enp0s8` stanza with `addresses: - 192.168.192.10/24` (file written, "Wrote 13 lines"), then applied with `sudo netplan apply`. Verified:
-
-```
-3: enp0s8: ... inet 192.168.192.10/24 brd 192.168.192.255 scope global enp0s8
-```
-
-This gives the SIEM a stable address on the isolated lab segment so agents always have a fixed manager IP to point at.
-
-**Agent traffic observed (06:46)**
-`tail -f /var/ossec/logs/ossec.log` showed the Windows host attempting to report in from the new subnet, initially rejected, then re-enrolling:
-
-```
-2026/08/05 06:46:18 wazuh-remoted: WARNING: (1213): Message from '192.168.192.20' not allowed. Cannot find the ID of the agent. Source agent ID is unknown.
-... (repeats every 10s) ...
-2026/08/05 06:46:48 wazuh-authd: INFO: New connection from 192.168.192.20
-```
-
-**Splunk installation / HTTPS and log forwarding (~12:04–12:20)**
-No terminal output was captured for Splunk. Three browser screenshots were taken in this window and, given the session title and the 12:20 note, they appear to show the Splunk web interface (likely over HTTPS) and the incoming forwarded events (see `chrome_zfXJBi4EOG.png`, `chrome_jbh0wEQBm7.png`, and `chrome_8VlGhetlKN.png`). The user's note at 12:20:05 states "Splunk is successfully getting the forwarded logs." The specific install commands, certificate configuration, and forwarder settings are **not** documented in this session's captures and should be re-captured.
-
-**Housekeeping**
-The third transcript for this session (`2026-08-05_1627_soc-lab-ubuntu.txt`) is empty — no commands were recorded.
-
-### WKS01 / `WIN11-LAB` (Windows 11 agent)
-
-No Windows-side transcript was captured. What can be inferred from the manager side only:
-
-- The host was registered as Wazuh agent ID `001`, originally with IP `10.0.3.15`.
-- It was later re-addressed onto the lab subnet at `192.168.192.20` and connected to `wazuh-authd`.
-- The user's 02:29:48 note ("I'm now detecting logs from my Windows VM on Wazuh") indicates the agent was reporting successfully at least once during the session.
-- A `Start-Service WazuhSvc` command intended for this host was accidentally typed into the Ubuntu shell (see Troubleshooting Log).
-
-### DC01 (Domain Controller)
+### DC01 (Windows Server 2022)
 
 *No activity captured for this section yet.*
 
-### KALI01 (Attacker box)
+### WKS01 (Windows 11)
 
 *No activity captured for this section yet.*
+
+### KALI01 (Kali Linux)
+
+*No terminal activity captured from the attacker box this session; the Hydra brute force was observed only from the SIEM01 side (source `192.168.192.30`).*
 
 ## 4. Troubleshooting Log
 
 | Issue | Cause | Fix |
 |---|---|---|
-| `sudo netstat -tulnp \| grep 1514` → `sudo: 'netstat': command not found` (occurred twice) | `net-tools` is not installed on this Ubuntu build; `netstat` is deprecated | Switched to the iproute2 equivalent: `sudo ss -tulnp \| grep -E '1514\|1515'`, which showed both listeners |
-| `sudo netstart -tulnp` → `sudo: 'netstart': command not found` | Typo (`netstart` instead of `netstat`) | Re-ran the command correctly, then abandoned `netstat` entirely in favour of `ss` |
-| `Start-Service WazuhSvc` → `Start-Service: command not found` | PowerShell command for the Windows agent typed into the Ubuntu manager's bash shell | Command belongs on the Windows 11 host; ignored on Linux and the agent service was managed from the Windows side instead (not captured) |
-| `manage_agents -1` → `invalid option -- '1'` plus usage text | Digit `1` typed instead of the letter `l` | Re-ran `manage_agents -l`, which returned `** No agent available. You need to add one first.` |
-| `manage_agents -a -n WIN11-LAB -i 10.0.3.15` → `CRITICAL: Key import only available on an agent.` | `-i` is *import authentication key* and is agent-only; on a manager the IP is supplied to `-a` directly | Dropped the flag-based approach and used the interactive `manage_agents` menu (`A` → name → IP → confirm), which returned `Agent added with ID 001.` |
-| Agent name mistyped as `WIN11=LAB` during interactive add | Keystroke error at the "name for the new agent" prompt | Corrected in-line before confirming; the extract step later listed the agent as `Name: WIN11-LAB` |
-| `ufw allow 1514/tcp` / `1515/tcp` reported "Rules updated" but `ufw status` = `Status: inactive` | UFW is not enabled on this host, so the rules are stored but not enforced — and equally, nothing is being blocked | No change made; confirmed with `sudo iptables -L -n \| grep -E '1514\|1515'` (empty output) that no filtering existed, and validated reachability by confirming the listeners with `ss` instead. UFW was deliberately left inactive |
-| `wazuh-remoted: WARNING: (1213): Message from '192.168.192.20' not allowed. Cannot find the ID of the agent.` repeating every 10s | The agent was registered against `10.0.3.15`, but after the subnet change it began reporting from `192.168.192.20`; the manager's key entry no longer matched the source, so `remoted` treated it as an unknown agent | The agent re-enrolled against `wazuh-authd` — `wazuh-authd: INFO: New connection from 192.168.192.20` immediately follows the last warning, which appears to have resolved the key/IP mismatch |
-| `enp0s8` was `UP` but had no IPv4 address (link-local IPv6 only), leaving the SIEM unreachable on the lab segment | `/etc/netplan/00-installer-config.yaml` only defined `enp0s3` (DHCP); `enp0s8` had no configuration | Added an `enp0s8` stanza with `addresses: - 192.168.192.10/24`, ran `sudo netplan apply`, and confirmed `inet 192.168.192.10/24` with `ip a show enp0s8` |
-| `enp0s3` address changed between transcripts (`10.0.3.15/24` at 03:56 → `10.0.2.15/24` at 06:34) | Interface is DHCP-configured (`dhcp4: true`), so the uplink address is not stable — likely a NAT network change between VM sessions | Not fixed directly; the *lab-facing* interface was pinned statically instead, so agent-to-manager communication no longer depends on the DHCP address |
-| `sca: INFO: Skipping policy '/var/ossec/ruleset/sca/cis_ubuntu22-04.yml': 'Check Ubuntu version.'` and `Security Configuration Assessment scan finished. Duration: 0 seconds.` | The bundled SCA policy targets Ubuntu 22.04; this host appears to be a different (newer) release, so the version precondition fails and the whole policy is skipped | No fix applied this session. SCA is effectively producing no findings — a matching CIS policy for the installed release needs to be added |
-| `wazuh-manager` memory grew from 227.7M at startup to 4.5–4.6G within ~1h48m on a VM with a task limit of 6165 | Normal-but-heavy Wazuh footprint (indexer connector, vulnerability scanner, 7014 enabled rules) on a small lab VM | Not addressed this session; noted as a resource risk to watch, since Splunk was later installed on the same host |
+| `sudo splunk status` → `sudo: 'splunk': command not found` | Splunk binary is not on the system `PATH` | Invoked Splunk using its full path, `/opt/splunk/bin/splunk` |
+| `splunkd 3791 was not running`; stale PID file present | Splunk daemon had stopped; leftover PID/helper state from the prior run | Splunk's own start routine stopped stale helpers and removed the stale PID file, then a restart was issued |
+| Restart warning: "Running Splunk Enterprise as root is deprecated…" | `splunk restart` was run under `sudo` (as root) without the expected flag | Re-ran the restart with `--run-as-root` to acknowledge and proceed |
+| `WARNING: Server Certificate Hostname Validation is disabled` during web-server startup | `server.conf [sslConfig] cliVerifyServerName` is disabled (default/lab config) | Left as-is for the lab; noted as expected behavior, no functional impact |
+| `mongod-8.0 … failed to open directory … cyrus-sasl-mongo-openssl3 … error: No such file or directory` | KV store (MongoDB) looked for a SASL plugin directory that does not exist in this build path | Non-fatal warning during startup; Splunk still reached running state (`splunkd is running (PID: 6626)`), so no action was required this session |
 
 ## 5. Attack & Detection Scenarios
 
-*No activity captured for this section yet. No attack simulation was run from KALI01 during this session; work was limited to log pipeline build-out.*
-
 | Scenario | Attack (KALI01) | Detection (SIEM01) | Status |
 |---|---|---|---|
+| SSH brute force against `socadmin` | Brute-force login attempts from `192.168.192.30` (appears to be a Hydra run per session note) | `/var/log/auth.log` shows multiple `Failed password` / `pam_unix(sshd:auth): authentication failure` entries and `srclimit_penalise` rate-limiting; one `Accepted password` login also recorded. Logs received by Splunk/Wazuh per note. | Attack successful (valid credential accepted); events captured. Detection rule authoring pending next session. |
 
 ## 6. Lessons Learned
 
-- `netstat` is not present on this Ubuntu build; `ss -tulnp` is the reliable way to confirm that `wazuh-authd` (1515) and `wazuh-remoted` (1514) are actually listening.
-- `manage_agents` flag semantics differ between manager and agent — `-i` imports a key on an *agent* and will fail on the manager. The interactive menu is the safer path for a one-off enrolment.
-- Wazuh keys are bound to the agent's registered IP. Any subnet or DHCP change on either side produces `(1213) Message from ... not allowed` until the agent re-enrols. Pinning the SIEM's lab interface to a static address (`192.168.192.10/24`) removes half of that failure mode; the agent should get a static address too.
-- Adding `ufw` rules is meaningless while `ufw status` is `inactive` — always check enforcement state before concluding a firewall is or isn't the cause of a connectivity problem.
-- Bundled SCA policies are release-pinned; a "scan finished in 0 seconds" result usually means the policy was skipped, not that the host is clean.
-- Watch memory on a single-VM SIEM: the Wazuh manager alone reached ~4.6 GB before Splunk was added to the same host.
-- Gap to close: the Splunk install and HTTPS configuration were done without terminal capture, so that part of the build isn't reproducible from these notes. Capture those steps next session.
+- Splunk was down at the start of the session — verify `splunkd` is running (via `/opt/splunk/bin/splunk status`) *before* generating attack traffic, or events risk being missed.
+- Use the full binary path `/opt/splunk/bin/splunk`; the `splunk` command is not on `PATH`.
+- Running Splunk as root now requires `--run-as-root` and is deprecated — worth revisiting to run Splunk under a dedicated service account.
+- SSH already applied a rate-limit penalty (`srclimit_penalise`) against the brute-force source, which itself is a useful detection signal alongside the failed-password events.
+- The brute force succeeded (an `Accepted password` appears), which is a reminder to harden `socadmin` credentials / SSH auth in the lab.
 
 ## 7. Changelog
 
-- **2026-08-05** — Verified Wazuh manager v4.12.0 (rc1) running on `soc-lab-ubuntu` with all daemons up; confirmed 1514/1515 listeners via `ss`; confirmed `<remote>` block set to secure/1514/tcp. Enrolled Windows 11 host as agent `001` (`WIN11-LAB`) and extracted its key (redacted). Assigned static `192.168.192.10/24` to `enp0s8` via netplan and applied. Observed and resolved agent key/IP mismatch after the agent moved to `192.168.192.20`. Noted Splunk install / HTTPS setup and successful log forwarding per session notes and browser screenshots (no terminal capture). One session transcript (`2026-08-05_1627`) was empty.
+- **2026-08-06** — Restarted Splunk on SIEM01 after finding it stopped; ran an SSH brute-force attack from `192.168.192.30` against `socadmin` and confirmed the attempts were captured in `/var/log/auth.log` and received by the SIEM. Detection rule writing deferred to next session. Screenshots: `VirtualBoxVM_VsrFQQ8cGt.png`, `VirtualBoxVM_pAzIVB5ApD.png`, `chrome_o8drOyn4Cf.png`, `VirtualBoxVM_PQnGIuQEHU.png`.
