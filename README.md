@@ -1,11 +1,11 @@
-# SOC Home Lab — Active Directory + SIEM Detection Lab
+# Home SOC Lab — Session: Splunk Installation & HTTPS Setup
 
 > Built and documented in an isolated home lab environment that I own.
 > Documentation generated with LabScribe and reviewed by hand.
 
 ## 1. Overview
 
-This session (2026-08-02 06:05 → 2026-08-03 13:07) was focused entirely on the Ubuntu SIEM host (`soc-lab-ubuntu`, the machine tracked as SIEM01 in the lab inventory). Work started with basic shell familiarization, then a full `apt update` / `apt upgrade` (37 packages), then a first attempt at installing the Wazuh 4.12.0 all-in-one stack. That first install completed on paper but left `wazuh-indexer` and `wazuh-manager` in a failed state, with the dashboard up but unable to reach OpenSearch on `127.0.0.1:9200`. Root-causing that led to two real environment problems: the VM was under the Wazuh minimum hardware spec (RAM was doubled in VirtualBox per the 19:50 note), and the root logical volume was only 24 GB of a 48 GB partition and had filled to 100%. After extending the LV to the full ~48 GB and growing the filesystem, Wazuh was reinstalled cleanly with `-o` (overwrite) and all four components came up. Splunk Enterprise 10.4.2 was then downloaded and installed via `dpkg`, and `enable boot-start` was run. Per the session notes, both Wazuh and Splunk ended up reachable from the VM and from the host machine, and later in the day a ping test between two lab machines succeeded. One item is still open: reading Splunk logs from the Ubuntu terminal returned permission denied.
+This session (2026-08-05, 00:53–12:23 UTC) was spent bringing the Ubuntu SIEM host (`soc-lab-ubuntu`) online as a Wazuh manager, enrolling the Windows 11 lab VM as agent `001` (`WIN11-LAB`), and re-addressing the host-only lab interface so manager and agent shared a routable lab subnet. Most of the captured work is Wazuh manager service verification, listener checks on TCP 1514/1515, agent registration via `manage_agents`, and a netplan change that gave `enp0s8` a static address of `192.168.192.10/24`. The user's notes record two milestones: Windows logs arriving in Wazuh at 02:29, and Splunk successfully receiving forwarded logs at 12:20. The Splunk installation and HTTPS work referenced in the session title is only evidenced by the browser screenshots and those notes — no Splunk terminal output was captured, so that portion is documented at a high level only. The third transcript (`2026-08-05_1627_soc-lab-ubuntu.txt`) is empty.
 
 | Host | OS | Role | IP |
 |---|---|---|---|
@@ -14,7 +14,13 @@ This session (2026-08-02 06:05 → 2026-08-03 13:07) was focused entirely on the
 | SIEM01 | Ubuntu + Splunk | SIEM / log collector | 10.10.10.30 |
 | KALI01 | Kali Linux | Attacker box | 10.10.10.40 |
 
-> Note: the only host with captured material this session is SIEM01, which reports its hostname as `soc-lab-ubuntu` (admin user `socadmin`). It now also runs the Wazuh 4.12.0 all-in-one stack (indexer + manager + Filebeat + dashboard) alongside Splunk. No IP addresses were shown in this session's transcripts, so the addresses above are carried over from the lab inventory and were not re-verified here.
+**Addressing actually observed in this session** (recorded separately, since it differs from the canonical table above):
+
+| Host (as seen) | Interface | Address | Notes |
+|---|---|---|---|
+| `soc-lab-ubuntu` (Wazuh manager / SIEM) | `enp0s3` | `10.0.2.15/24` (DHCP, later `10.0.3.15/24` early in the session) | NAT-style uplink; address changed between transcripts |
+| `soc-lab-ubuntu` | `enp0s8` | `192.168.192.10/24` (static, set this session) | Lab-facing / host-only interface |
+| `WIN11-LAB` (Wazuh agent 001) | — | Registered as `10.0.3.15`, later seen connecting from `192.168.192.20` | Address mismatch caused the rejected-message errors below |
 
 ## 2. Network Diagram
 
@@ -35,27 +41,77 @@ graph TB
 
 ## 3. Build Steps
 
-### SIEM01 — `soc-lab-ubuntu` (Ubuntu, Wazuh + Splunk)
+### SIEM01 — `soc-lab-ubuntu` (Ubuntu + Wazuh manager, later Splunk)
 
-1. **Shell familiarization (2026-08-02 10:58–11:05).** Confirmed the capture wrapper was live (`echo $LABSCRIBE_ACTIVE` → `1`), then poked at `ls`, `pwd`, `whoami`, and `help` to get oriented. Several inputs were Windows habits or typos (`LS`, `cmd`) and returned "command not found"; the script session ended with exit code 127 as a result. Nothing was configured here — this was orientation only, but it matters because everything later in the session was done from this same TTY console rather than over SSH.
-2. **VM resource review and RAM increase (afternoon/evening of 2026-08-02).** The VirtualBox VM configuration was reviewed and, per the 19:50 note, RAM was doubled ("There's more then enough RAM space now as I've doubled it"). This was the first response to the Wazuh hardware-requirement error and matters because the Wazuh indexer is a JVM/OpenSearch process that will not stay up on an undersized guest (see `VirtualBoxVM_2DtOzJSqSe.png`, `VirtualBoxVM_NF0gdqKEyN.png`).
-3. **Full system update (2026-08-02 22:40).** `sudo apt update` reported 39 upgradable packages; `sudo apt upgrade -y` then upgraded 37 (592 MB), including `base-files`, `iproute2`, `libgcrypt20`, `apport`, `fwupd`, `packagekit` and a large batch of `linux-firmware-*` packages, and regenerated `/boot/initrd.img-7.0.0-28-generic`. Patching before installing a SIEM matters so that later "why is this broken" debugging isn't confused by stale packages. `apt` also flagged old `linux-*-7.0.0-14` kernel packages plus `pollinate` as autoremovable — left in place for now (they are disk consumers, which becomes relevant in step 6).
-4. **First Wazuh install attempt (2026-08-02 22:42–22:53).** Fetched the assistant with `curl -sO https://packages.wazuh.com/4.12/wazuh-install.sh` and ran `sudo bash wazuh-install.sh -a`. The assistant warned the running Ubuntu release is not on its recommended list, then hard-failed the hardware precheck (4 GB RAM / 2 CPU cores). Re-ran as `sudo bash wazuh-install.sh -a -i` to bypass the precheck; the run generated the root/admin/indexer/Filebeat/dashboard certificates and `wazuh-install-files.tar` (which holds the cluster key, certs and passwords — treat as `[REDACTED]`, do not commit), installed the indexer, manager, Filebeat and dashboard, and reported each service as started. The web interface port was set to 443.
-5. **Post-install health check (2026-08-03 00:37–00:50).** `systemctl status` showed the real picture: `wazuh-indexer.service` **failed** (exit 1, 1.5 G memory peak), `wazuh-manager.service` **failed** (exit 1), and `wazuh-dashboard.service` active but logging `[ConnectionError]: connect ECONNREFUSED 127.0.0.1:9200` every ~2 s — i.e. the dashboard had no indexer to talk to. `free -h` showed only 3.3 GiB total RAM with 2.1 GiB free and 3.8 GiB swap unused, so memory pressure alone did not explain it. `sudo journalctl -u wazuh-indexer -n 50 --no-pager` showed a Lucene `IndexingChain.flush` / `PersistedClusterStateService$Writer.addMetadata` failure followed by `fatal error in thread [opensearch[node-1][scheduler][T#1]], exiting` and `java.lang.NoClassDefFoundError: Could not initialize class com.sun.jna.Native`, with a pointer to `/var/log/wazuh-indexer/wazuh-cluster.log`. Both symptoms are consistent with the indexer being unable to write to disk. Research and web-UI checks around this point were captured in the browser and VM windows (see `chrome_S8Xxs3lh73.png`, `VirtualBoxVM_YEVumwIsUS.png`, `chrome_RPsy7tVg48.png`).
-6. **Disk / LVM expansion (2026-08-03 04:21–04:58).** A repeat `sudo bash wazuh-install.sh -a` refused to continue ("Wazuh manager already installed", same for indexer, dashboard and Filebeat) and suggested `-o/--overwrite`. Before doing that, `df -h` confirmed the actual fault: `/dev/mapper/ubuntu--vg-ubuntu--lv` was **24G, 24G used, 0 available, 100%**. `lsblk` showed `sda` is 50 G with `sda3` at 48 G but the logical volume only claiming 24 G — the Ubuntu installer default. After a couple of false starts (see Troubleshooting), `sudo modprobe dm-mod` then `sudo lvextend -l +100%FREE /dev/mapper/ubuntu--vg-ubuntu--lv` grew the LV from <24.00 GiB to <48.00 GiB, and `sudo resize2fs` grew the mounted root filesystem online to 12581888 4k blocks (~48 G). This is the fix that actually unblocked Wazuh — an OpenSearch node cannot flush cluster state onto a full root filesystem. `df -h` also showed the `LabCapture` shared folder at 96% used (23 G free), worth watching.
-7. **Wazuh clean reinstall (2026-08-03 04:58–05:05).** `sudo bash wazuh-install.sh -a -o` removed the previous manager/indexer/Filebeat/dashboard, regenerated all certificates and the install-files tarball, and reinstalled the stack. This run passed the hardware check without `-i` (consistent with the RAM increase in step 2) and reported every service started: `wazuh-indexer` at 04:59:45, indexer cluster security initialized at 04:59:50, `wazuh-manager` at 05:01:52, `filebeat` at 05:02:01, `wazuh-dashboard` at 05:05:03, internal users updated (backup written to `/etc/wazuh-indexer/internalusers-backup`), `filebeat.yml` updated to use the Filebeat keystore credentials, and the dashboard web application initialized at 05:05:47. Generated credentials are deliberately not recorded here — `[REDACTED]`.
-8. **Splunk Enterprise 10.4.2 install (2026-08-03 05:29–06:0x).** Downloaded `splunk-10.4.2-33c3bf42cd73-linux-amd64.deb` (1.24 GB) with `wget` at ~28 MB/s, then installed with `sudo dpkg -i splunk-10.4.2-33c3bf42cd73-linux-amd64.deb` (package `splunk (10.4.2)` unpacked and set up; one benign `find: '/opt/splunk/lib/python3.7/site-packages': No such file or directory` warning). Ran `sudo /opt/splunk/bin/splunk enable boot-start` and paged through the Splunk General Terms so Splunk starts automatically with the VM. Running Splunk alongside Wazuh is the point of this host — per the 12:28 note, this is "vital on my setup so that I'm able to analyze logs from future threats."
-9. **Access + connectivity verification (2026-08-03, per notes).** The 01:30 note records that both Wazuh and Splunk were reachable from the host machine as well as from inside the VM, with one caveat carried forward: "Check for permissions again later for Splunk. Permissions were denied to check logs in Ubuntu terminal." The 12:34 note records that "Both machines successfully pinged one another" — the underlying transcript for that check was not captured, so the exact hosts and addresses are unconfirmed. Screenshots taken at that time appear to cover the connectivity/verification step (see `VirtualBoxVM_856aoJdkje.png`, `VirtualBoxVM_UFAuQvNU9K.png`).
+**VirtualBox / VM preparation (early session, ~01:00–02:00)**
+Two VirtualBox screenshots were taken before any terminal capture began; based on timing they appear to cover VM/adapter setup for the lab VMs, which is what made the later host-only addressing work possible (see `VirtualBoxVM_PhpVVBxto0.png`, `VirtualBoxVM_OzrjpDAivu.png`). No transcript exists for this window, so the exact changes are not documented.
 
-### DC01 — Windows Server 2022 (Domain Controller + DNS)
+**Wazuh manager service verification (03:56–03:58)**
+Restarted and inspected `wazuh-manager`. The unit came up `active (running)` with all expected daemons present (`wazuh-authd`, `wazuh-remoted`, `wazuh-analysisd`, `wazuh-syscheckd`, `wazuh-logcollector`, `wazuh-monitord`, `wazuh-modulesd`, `wazuh-db`, `wazuh-execd`, plus the API workers). Confirming the full daemon set matters because agent enrollment needs `wazuh-authd` (1515) and agent traffic needs `wazuh-remoted` (1514) — if either is missing, agents silently fail to report.
+
+**Version check**
+`/var/ossec/bin/wazuh-control info` reported `WAZUH_VERSION="v4.12.0"`, `WAZUH_REVISION="rc1"`, `WAZUH_TYPE="server"`. Recording the exact build matters when matching agent packages to the manager.
+
+**Firewall / listener checks**
+Added `ufw allow 1514/tcp` and `ufw allow 1515/tcp` ("Rules updated" / "Rules updated (v6)"), then `ufw status` returned `Status: inactive` — so the rules are staged but not enforcing anything yet. `iptables -L -n | grep -E '1514|1515'` returned nothing, confirming no host-level block. Listener state was verified with `ss`:
+
+```
+tcp LISTEN 0 128 0.0.0.0:1515 users:(("wazuh-authd",pid=3969,fd=3))
+tcp LISTEN 0 128 0.0.0.0:1514 users:(("wazuh-remoted",pid=4041,fd=4))
+```
+
+**Remote block configuration check**
+`grep -A 5 "<remote>" /var/ossec/etc/ossec.conf` confirmed the manager is configured for `secure` connections on port `1514/tcp` with a `queue_size` of `131072`. This is the setting the Windows agent's `ossec.conf` must match.
+
+**Agent enrollment — `WIN11-LAB` (04:38–04:48)**
+`manage_agents -l` initially reported `** No agent available. You need to add one first.` The agent was then added through the interactive `manage_agents` menu (name `WIN11-LAB`, IP `10.0.3.15`), producing `Agent added with ID 001.` The enrollment key was extracted via the `(E)xtract` option — key value `[REDACTED]`. Manager logs confirm the flow:
+
+```
+2026/08/05 04:48:12 wazuh-authd: INFO: Agent key generated for agent 'WIN11-LAB' (requested locally)
+2026/08/05 04:48:15 wazuh-remoted: INFO: (1409): Authentication file changed. Updating.
+2026/08/05 04:48:15 wazuh-remoted: INFO: (1410): Reading authentication keys file.
+```
+
+A subsequent `manage_agents -l` showed `ID: 001, Name: WIN11-LAB, IP: 10.0.3.15`. This step is the whole point of the manager: without a key pair, `wazuh-remoted` drops the agent's traffic as unknown.
+
+**Static lab addressing on `enp0s8` (06:34–06:45)**
+`ip a` showed `enp0s8` up but with only a link-local IPv6 address — no IPv4 — while `enp0s3` had moved to `10.0.2.15/24`. `/etc/netplan/00-installer-config.yaml` was edited in `nano` to add an `enp0s8` stanza with `addresses: - 192.168.192.10/24` (file written, "Wrote 13 lines"), then applied with `sudo netplan apply`. Verified:
+
+```
+3: enp0s8: ... inet 192.168.192.10/24 brd 192.168.192.255 scope global enp0s8
+```
+
+This gives the SIEM a stable address on the isolated lab segment so agents always have a fixed manager IP to point at.
+
+**Agent traffic observed (06:46)**
+`tail -f /var/ossec/logs/ossec.log` showed the Windows host attempting to report in from the new subnet, initially rejected, then re-enrolling:
+
+```
+2026/08/05 06:46:18 wazuh-remoted: WARNING: (1213): Message from '192.168.192.20' not allowed. Cannot find the ID of the agent. Source agent ID is unknown.
+... (repeats every 10s) ...
+2026/08/05 06:46:48 wazuh-authd: INFO: New connection from 192.168.192.20
+```
+
+**Splunk installation / HTTPS and log forwarding (~12:04–12:20)**
+No terminal output was captured for Splunk. Three browser screenshots were taken in this window and, given the session title and the 12:20 note, they appear to show the Splunk web interface (likely over HTTPS) and the incoming forwarded events (see `chrome_zfXJBi4EOG.png`, `chrome_jbh0wEQBm7.png`, and `chrome_8VlGhetlKN.png`). The user's note at 12:20:05 states "Splunk is successfully getting the forwarded logs." The specific install commands, certificate configuration, and forwarder settings are **not** documented in this session's captures and should be re-captured.
+
+**Housekeeping**
+The third transcript for this session (`2026-08-05_1627_soc-lab-ubuntu.txt`) is empty — no commands were recorded.
+
+### WKS01 / `WIN11-LAB` (Windows 11 agent)
+
+No Windows-side transcript was captured. What can be inferred from the manager side only:
+
+- The host was registered as Wazuh agent ID `001`, originally with IP `10.0.3.15`.
+- It was later re-addressed onto the lab subnet at `192.168.192.20` and connected to `wazuh-authd`.
+- The user's 02:29:48 note ("I'm now detecting logs from my Windows VM on Wazuh") indicates the agent was reporting successfully at least once during the session.
+- A `Start-Service WazuhSvc` command intended for this host was accidentally typed into the Ubuntu shell (see Troubleshooting Log).
+
+### DC01 (Domain Controller)
 
 *No activity captured for this section yet.*
 
-### WKS01 — Windows 11 (domain-joined workstation)
-
-*No activity captured for this section yet.*
-
-### KALI01 — Kali Linux (attacker)
+### KALI01 (Attacker box)
 
 *No activity captured for this section yet.*
 
@@ -63,41 +119,36 @@ graph TB
 
 | Issue | Cause | Fix |
 |---|---|---|
-| `LS`, `cmd`, `hahaha` → "command not found"; `finally got it running :)` → `bash: syntax error near unexpected token ')'`; script session exited 127 | Windows/typo habits and free text typed at a bash prompt | Used the correct lowercase Linux commands (`ls`, `pwd`, `whoami`, `help`); no system impact |
-| `wazuh-install.sh`: "The current system does not match with the list of recommended systems. The installation may not work properly." | Host is running a newer Ubuntu release than the assistant's supported list (16.04–22.04) | Accepted the risk and continued; noted as a possible contributor if the stack misbehaves later |
-| `ERROR: Your system does not meet the recommended minimum hardware requirements of 4Gb of RAM and 2 CPU cores` | VM was provisioned under spec — `free -h` later confirmed only 3.3 GiB total RAM | Re-ran with `-i` to ignore the check for the first attempt, then doubled the VM's RAM in VirtualBox (19:50 note); the 04:58 reinstall passed the check without `-i` |
-| `-i` and `i` entered as standalone commands → "command not found" | The installer flag was typed on its own line instead of appended to the command | Re-ran the full command as `sudo bash wazuh-install.sh -a -i` |
-| `wazuh-indexer.service` failed (`code=exited, status=1/FAILURE`) and `wazuh-manager.service` failed after the first "successful" install | Indexer could not start, so the manager's dependency chain also failed; root cause traced to the full root filesystem | Fixed the disk (LVM extend + resize2fs) then reinstalled Wazuh with `-o`; all services reported started afterwards |
-| `wazuh-dashboard` active but flooding `[ConnectionError]: connect ECONNREFUSED 127.0.0.1:9200` | Dashboard (OpenSearch Dashboards) was healthy but had no indexer listening on 9200 | Resolved as a side effect of getting `wazuh-indexer` running |
-| `journalctl -u wazuh-indexer`: Lucene `IndexingChain.flush` / `PersistedClusterStateService.addMetadata` failure, then `fatal error in thread ... exiting` and `java.lang.NoClassDefFoundError: Could not initialize class com.sun.jna.Native` | Indexer could not write cluster state / initialize its native JNA library — both expected symptoms when there is zero free space on `/` | Freed space by extending the root LV from 24 G to ~48 G; full detail was also available in `/var/log/wazuh-indexer/wazuh-cluster.log` |
-| `Notice: journal has been rotated since unit was started, output may be incomplete` | Journal rotated (likely pressured by the full disk) between service start and inspection | Used `journalctl -u <unit> -n 50 --no-pager` and the component's own log file under `/var/log/wazuh-indexer/` |
-| Re-run of installer: `ERROR: Wazuh manager already installed` (and indexer / dashboard / Filebeat) | A partial-but-present install from the 22:48 run was already on disk | Followed the assistant's own advice and used `sudo bash wazuh-install.sh -a -o` to wipe and reinstall once the disk was fixed |
-| `df -h`: `/dev/mapper/ubuntu--vg-ubuntu--lv` 24G, 0 available, **100% used** on `/` | Ubuntu's guided-LVM installer only allocated ~24 G of the 48 G `sda3` partition to the root LV; the apt upgrade plus the Wazuh stack filled it | `sudo lvextend -l +100%FREE /dev/mapper/ubuntu--vg-ubuntu--lv` (24 GiB → 48 GiB) then `sudo resize2fs` for an online grow to 12581888 blocks |
-| `sudo lvextend -1 ... +100%FREE` → `lvextend: invalid option -- '1'` | Digit `1` typed instead of lowercase `-l` | Retyped with `-l` |
-| `lvextend -l +100%FREE ...` (no sudo) → `WARNING: Running as a non-root user`, `/dev/mapper/control: open failed: Permission denied`, `Incompatible libdevmapper 1.02.205 and kernel driver (unknown version)`, `Can't get lock for ubuntu-vg` | Command run unprivileged, and the `dm-mod` kernel module was not loaded (`lsmod \| grep dm_mod` returned nothing) so libdevmapper could not talk to the kernel | `sudo modprobe dm-mod`, then re-ran the extend with `sudo` — succeeded |
-| `resize2fs` → `The filesystem is already 6290432 (4k) blocks long. Nothing to do!` | Run before the logical volume had actually been extended | Re-ran `resize2fs` after the successful `lvextend`; filesystem grew online to 12581888 blocks |
-| `dpkg -i /media/sf_LabCapture/splunk-*.deb` → `cannot access archive: No such file or directory`, then `dpkg -i splunk.deb` → same | The `.deb` was saved to the home directory under its full versioned filename, not to the shared folder and not as `splunk.deb` (the `-O splunk.deb` in the `wget` line was edited out before execution) | Installed using the actual filename: `sudo dpkg -i splunk-10.4.2-33c3bf42cd73-linux-amd64.deb` |
-| Splunk postinstall warning: `find: '/opt/splunk/lib/python3.7/site-packages': No such file or directory` | Legacy path referenced by the package's setup script; this Splunk build ships a different Python version | No action needed — `Setting up splunk (10.4.2)…` finished with `complete` and the install was usable |
-| "Permissions were denied to check logs in Ubuntu terminal" for Splunk (01:30 note) | Splunk log files under `/opt/splunk/var/log/splunk/` are owned by root/the Splunk service account, and `socadmin` is not in that group | **Open** — plan is to read them with `sudo` and/or fix group membership/ownership; flagged in the note for follow-up |
-| `LabCapture` shared folder at 96% (443 G used, 23 G free) | Session captures and installers accumulating on the host-shared volume | Not addressed this session; monitor before the next long capture run |
+| `sudo netstat -tulnp \| grep 1514` → `sudo: 'netstat': command not found` (occurred twice) | `net-tools` is not installed on this Ubuntu build; `netstat` is deprecated | Switched to the iproute2 equivalent: `sudo ss -tulnp \| grep -E '1514\|1515'`, which showed both listeners |
+| `sudo netstart -tulnp` → `sudo: 'netstart': command not found` | Typo (`netstart` instead of `netstat`) | Re-ran the command correctly, then abandoned `netstat` entirely in favour of `ss` |
+| `Start-Service WazuhSvc` → `Start-Service: command not found` | PowerShell command for the Windows agent typed into the Ubuntu manager's bash shell | Command belongs on the Windows 11 host; ignored on Linux and the agent service was managed from the Windows side instead (not captured) |
+| `manage_agents -1` → `invalid option -- '1'` plus usage text | Digit `1` typed instead of the letter `l` | Re-ran `manage_agents -l`, which returned `** No agent available. You need to add one first.` |
+| `manage_agents -a -n WIN11-LAB -i 10.0.3.15` → `CRITICAL: Key import only available on an agent.` | `-i` is *import authentication key* and is agent-only; on a manager the IP is supplied to `-a` directly | Dropped the flag-based approach and used the interactive `manage_agents` menu (`A` → name → IP → confirm), which returned `Agent added with ID 001.` |
+| Agent name mistyped as `WIN11=LAB` during interactive add | Keystroke error at the "name for the new agent" prompt | Corrected in-line before confirming; the extract step later listed the agent as `Name: WIN11-LAB` |
+| `ufw allow 1514/tcp` / `1515/tcp` reported "Rules updated" but `ufw status` = `Status: inactive` | UFW is not enabled on this host, so the rules are stored but not enforced — and equally, nothing is being blocked | No change made; confirmed with `sudo iptables -L -n \| grep -E '1514\|1515'` (empty output) that no filtering existed, and validated reachability by confirming the listeners with `ss` instead. UFW was deliberately left inactive |
+| `wazuh-remoted: WARNING: (1213): Message from '192.168.192.20' not allowed. Cannot find the ID of the agent.` repeating every 10s | The agent was registered against `10.0.3.15`, but after the subnet change it began reporting from `192.168.192.20`; the manager's key entry no longer matched the source, so `remoted` treated it as an unknown agent | The agent re-enrolled against `wazuh-authd` — `wazuh-authd: INFO: New connection from 192.168.192.20` immediately follows the last warning, which appears to have resolved the key/IP mismatch |
+| `enp0s8` was `UP` but had no IPv4 address (link-local IPv6 only), leaving the SIEM unreachable on the lab segment | `/etc/netplan/00-installer-config.yaml` only defined `enp0s3` (DHCP); `enp0s8` had no configuration | Added an `enp0s8` stanza with `addresses: - 192.168.192.10/24`, ran `sudo netplan apply`, and confirmed `inet 192.168.192.10/24` with `ip a show enp0s8` |
+| `enp0s3` address changed between transcripts (`10.0.3.15/24` at 03:56 → `10.0.2.15/24` at 06:34) | Interface is DHCP-configured (`dhcp4: true`), so the uplink address is not stable — likely a NAT network change between VM sessions | Not fixed directly; the *lab-facing* interface was pinned statically instead, so agent-to-manager communication no longer depends on the DHCP address |
+| `sca: INFO: Skipping policy '/var/ossec/ruleset/sca/cis_ubuntu22-04.yml': 'Check Ubuntu version.'` and `Security Configuration Assessment scan finished. Duration: 0 seconds.` | The bundled SCA policy targets Ubuntu 22.04; this host appears to be a different (newer) release, so the version precondition fails and the whole policy is skipped | No fix applied this session. SCA is effectively producing no findings — a matching CIS policy for the installed release needs to be added |
+| `wazuh-manager` memory grew from 227.7M at startup to 4.5–4.6G within ~1h48m on a VM with a task limit of 6165 | Normal-but-heavy Wazuh footprint (indexer connector, vulnerability scanner, 7014 enabled rules) on a small lab VM | Not addressed this session; noted as a resource risk to watch, since Splunk was later installed on the same host |
 
 ## 5. Attack & Detection Scenarios
 
+*No activity captured for this section yet. No attack simulation was run from KALI01 during this session; work was limited to log pipeline build-out.*
+
 | Scenario | Attack (KALI01) | Detection (SIEM01) | Status |
 |---|---|---|---|
-| *No attack or detection activity captured for this session yet — work was limited to standing up the SIEM host.* | — | — | Not started |
 
 ## 6. Lessons Learned
 
-- "Installer reported success" is not the same as "service is running." The first Wazuh run printed `INFO: wazuh-indexer service started`, but `systemctl status` showed both the indexer and manager had already failed. Always verify with `systemctl status` / `journalctl` after an all-in-one installer.
-- A repeating `ECONNREFUSED 127.0.0.1:9200` in the Wazuh dashboard is almost never a dashboard problem — it means the indexer is down. Chase the dependency, not the loudest log.
-- Ubuntu's guided LVM install leaves roughly half the disk unallocated. `lsblk` + `df -h` together (partition size vs. LV size vs. free space) is the fastest way to spot it. Doing `lvextend -l +100%FREE` + `resize2fs` right after OS install would have avoided most of this session's pain.
-- `lvextend` failures that mention `/dev/mapper/control: open failed` are a two-part problem: run it with `sudo`, and make sure `dm-mod` is loaded (`lsmod | grep dm_mod`, then `modprobe dm-mod`).
-- Disk exhaustion shows up as weird, unrelated-looking Java errors (Lucene flush failures, `NoClassDefFoundError` on `com.sun.jna.Native`). Check `df -h` early when a JVM service dies in a way that makes no sense.
-- Bypassing a hardware precheck with `-i` gets the installer to run but doesn't make the box adequate — the real fix was giving the VM more RAM.
-- Note the exact downloaded filename before running `dpkg -i`; guessing at `splunk.deb` or a shared-folder path cost two failed commands.
-- `wazuh-install-files.tar` and the generated internal-user passwords are secrets. Keep them off the repo; the internal-users backup lives at `/etc/wazuh-indexer/internalusers-backup`.
+- `netstat` is not present on this Ubuntu build; `ss -tulnp` is the reliable way to confirm that `wazuh-authd` (1515) and `wazuh-remoted` (1514) are actually listening.
+- `manage_agents` flag semantics differ between manager and agent — `-i` imports a key on an *agent* and will fail on the manager. The interactive menu is the safer path for a one-off enrolment.
+- Wazuh keys are bound to the agent's registered IP. Any subnet or DHCP change on either side produces `(1213) Message from ... not allowed` until the agent re-enrols. Pinning the SIEM's lab interface to a static address (`192.168.192.10/24`) removes half of that failure mode; the agent should get a static address too.
+- Adding `ufw` rules is meaningless while `ufw status` is `inactive` — always check enforcement state before concluding a firewall is or isn't the cause of a connectivity problem.
+- Bundled SCA policies are release-pinned; a "scan finished in 0 seconds" result usually means the policy was skipped, not that the host is clean.
+- Watch memory on a single-VM SIEM: the Wazuh manager alone reached ~4.6 GB before Splunk was added to the same host.
+- Gap to close: the Splunk install and HTTPS configuration were done without terminal capture, so that part of the build isn't reproducible from these notes. Capture those steps next session.
 
 ## 7. Changelog
 
-- **2026-08-02 → 2026-08-03 — Ubuntu SIEM host: disk, LVM & Wazuh/Splunk install.** Patched the OS (37 packages). Increased VM RAM after the Wazuh hardware precheck failed. First Wazuh 4.12.0 all-in-one install left the indexer and manager failed with the dashboard stuck on `ECONNREFUSED 127.0.0.1:9200`; traced to `/` being 100% full at 24 G. Loaded `dm-mod`, extended the root LV to the full ~48 G and grew the ext4 filesystem online, then reinstalled Wazuh with `-o` — indexer, manager, Filebeat and dashboard all came up and the dashboard web app initialized. Installed Splunk Enterprise 10.4.2 from `.deb` and enabled boot-start. Both UIs confirmed reachable from the VM and the host per session notes; a later ping test between two lab machines succeeded. Open item: permission denied when reading Splunk logs as `socadmin`.
+- **2026-08-05** — Verified Wazuh manager v4.12.0 (rc1) running on `soc-lab-ubuntu` with all daemons up; confirmed 1514/1515 listeners via `ss`; confirmed `<remote>` block set to secure/1514/tcp. Enrolled Windows 11 host as agent `001` (`WIN11-LAB`) and extracted its key (redacted). Assigned static `192.168.192.10/24` to `enp0s8` via netplan and applied. Observed and resolved agent key/IP mismatch after the agent moved to `192.168.192.20`. Noted Splunk install / HTTPS setup and successful log forwarding per session notes and browser screenshots (no terminal capture). One session transcript (`2026-08-05_1627`) was empty.
