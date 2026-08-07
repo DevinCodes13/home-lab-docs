@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-08-07 — Documented session "Ubuntu Setup — Disk, LVM & Wazuh Install" (12 transcripts, 7 screenshots, 4 notes)
 - 2026-08-03 — Documented session "SEIM Running Splunk Install" (2 transcripts, 3 screenshots, 1 notes)
 - 2026-08-03 — Documented session "SEIM Running Splunk Install" (2 transcripts, 3 screenshots, 1 notes)
 - 2026-08-02 — Documented session "SOC-Lab-Ubuntu Day 1" (6 transcripts, 2 screenshots, 1 notes)
