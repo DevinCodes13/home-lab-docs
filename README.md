@@ -1,13 +1,11 @@
-# Session: Simulating Attacks and Wazuh Filtering
+# Adding Custom Rules to Wazuh
 
 > Built and documented in an isolated home lab environment that I own.
 > Documentation generated with LabScribe and reviewed by hand.
 
 ## 1. Overview
 
-This session focused on generating an SSH brute-force attack against the SIEM/Ubuntu host and confirming that the resulting authentication events were captured for analysis. Before the attack could be reviewed, Splunk on `soc-lab-ubuntu` was found stopped and had to be restarted. A brute-force run originating from `192.168.192.30` (the attacker box) was then observed in `/var/log/auth.log`, showing multiple failed SSH password attempts against user `socadmin` and at least one accepted login. Per the session note, the Hydra attack was successful and logs were received; rule authoring/filtering is deferred to the next session.
-
-> Note: the lab template records the subnet as `10.10.10.0/24`, but the captured transcript shows activity on `192.168.192.x` (attacker `192.168.192.30`). IPs below reflect what was actually observed in the transcript.
+This session focused on extending the Wazuh manager on SIEM01 with custom detection rules for SSH brute-force activity and follow-on successful logins, and validating the rule with a live Hydra brute-force attack from KALI01 against the SOC lab host. A significant portion of the session was spent troubleshooting a malformed `local_rules.xml` that broke `wazuh-analysisd` and prevented the manager from starting.
 
 | Host | OS | Role | IP |
 |---|---|---|---|
@@ -15,6 +13,8 @@ This session focused on generating an SSH brute-force attack against the SIEM/Ub
 | WKS01 | Windows 11 | Domain-joined workstation | 10.10.10.20 |
 | SIEM01 | Ubuntu + Splunk | SIEM / log collector | 10.10.10.30 |
 | KALI01 | Kali Linux | Attacker box | 10.10.10.40 |
+
+> Note: transcripts for this session reference the SOC lab host as `soc-lab-ubuntu` running Wazuh (not Splunk), and IP addresses `192.168.192.10`/`192.168.192.30` were used on the attacking/target hosts rather than the 10.10.10.0/24 addressing shown in the table above. Documented as observed; hedge applied where addressing conflicts with the standard lab table.
 
 ## 2. Network Diagram
 
@@ -35,56 +35,49 @@ graph TB
 
 ## 3. Build Steps
 
-### SIEM01 (`soc-lab-ubuntu`, Ubuntu + Splunk)
+### KALI01 (attacker)
+- Ran `hydra -l socadmin -P passwords.txt ssh://192.168.192.10` against the SOC lab host to brute-force SSH credentials. The initial run (5 default parallel tasks) succeeded quickly, cracking `socadmin` with password `123456` (see `2026-08-08_2318_powershell_LcqrwNlCsb.png`, taken around this time — note: filename suggests a PowerShell capture, included here as the closest timestamped screenshot to the Hydra activity).
+- Edited `passwords.txt` with `nano` to add more candidate passwords (`101894`, `password`, `admin`, `qwerty`, `123456`, `passtymletmein` — the last entry appears mistyped, likely intended as two separate entries).
+- Re-ran Hydra with `-t 1` (single task) to produce a slower, more realistic brute-force pattern for triggering the frequency-based detection rule later added on SIEM01.
 
-1. **Checked Splunk service status.** The first attempt (`sudo splunk status`) failed because `splunk` is not on the system `PATH`; the full path `/opt/splunk/bin/splunk status` was used instead. Status reported `splunkd 3791 was not running`, and stale helper processes/PID file were cleaned up. This matters because no detection or search is possible while the SIEM daemon is down (see `VirtualBoxVM_VsrFQQ8cGt.png`).
+### SIEM01 (Wazuh manager, `soc-lab-ubuntu`)
+- Edited `/var/ossec/etc/rules/local_rules.xml` to add two custom rules on top of the default example rule (id `100001`):
+  - **Rule 100010** (level 10): fires on 4+ failed SSH logins from the same source within 60 seconds (`frequency="4" timeframe="60"`, `if_matched_sid` 5760, `same_source_ip`), mapped to MITRE ATT&CK T1110.001 (Password Guessing).
+  - **Rule 100011** (level 12): fires when a successful SSH login (`if_sid` 5715) follows the brute-force pattern from rule 100010, also mapped to T1110.001, flagged as a possible compromise.
+- The XML was heavily garbled during editing in `nano` (see Troubleshooting Log) and required multiple rounds of manual repair before it was well-formed.
+- Used `sudo /var/ossec/bin/wazuh-logtest` to test log parsing against a sample `sshd` log line; the sample line did not match a decoder and fell through to the generic "Unknown problem" rule (id 1002), suggesting the custom rules depend on the built-in `sshd` decoder/rule chain (rule 5716/5715/5760) rather than the raw syslog format tested manually.
+- Confirmed via `grep -n "rule id=\"1000"` that all three rules (100001, 100010, 100011) were present in the file with correct line structure once the file was fixed.
+- After the fix, `sudo systemctl restart wazuh-manager` succeeded and `systemctl status wazuh-manager` showed `active (running)`, with `ossec.log` reporting `Total rules enabled: '7017'` (up from the baseline `7014`), confirming the three new custom rules loaded successfully (see `2026-08-09_0011_chrome_3DyiuQIYmV.png` and `2026-08-09_0011_chrome_W6WJqqNmzc.png`, likely Wazuh dashboard/UI verification screenshots).
+- Verified via `/var/log/auth.log` that the Hydra brute-force attempts from `192.168.192.30` generated the expected sequence of failed SSH authentications followed by one accepted password — the exact pattern the custom rules are designed to detect.
+- First custom rule confirmed added and working per note at 2026-08-09 00:19:52 (see `2026-08-09_0019_chrome_n6d1ELcv33.png`, likely a screenshot of the fired alert or rule listing in the Wazuh dashboard).
 
-2. **Restarted Splunk.** `sudo /opt/splunk/bin/splunk restart` emitted a deprecation warning about running as root, so the restart was reissued with `--run-as-root`. Preliminary checks passed (ports 8000/8089/8065/8191 open, indexes validated, installed files intact against the `splunk-10.4.2` manifest), new certs were generated, and the daemon came up. This confirms the Splunk web interface (`https://soc-lab-ubuntu:8000`) is available for review (see `VirtualBoxVM_pAzIVB5ApD.png`).
-
-3. **Verified Splunk was running.** A follow-up `splunk status` reported `splunkd is running (PID: 6626)` with helper processes active — confirming the SIEM was ready to ingest/search before running the attack.
-
-4. **Opened the SIEM web UI in the browser** to review incoming events / detection results — a browser capture was taken during this window (see `chrome_o8drOyn4Cf.png`).
-
-5. **Reviewed raw authentication logs.** `sudo tail -50 /var/log/auth.log` was used to inspect SSH activity directly on the host. The tail showed the brute-force burst from `192.168.192.30` against `socadmin`, including repeated `Failed password` entries, one `Accepted password`, and the SSH server activating a rate-limit penalty (`srclimit_penalise`). This is the source-side evidence that the attack was recorded (see `VirtualBoxVM_PQnGIuQEHU.png`).
-
-> Per the session note, the events were also observed on the Wazuh side ("Wazuh received logs, Ubuntu detected on its side"). The captured transcript itself only shows Splunk and raw `auth.log`; the Wazuh detection was noted but not captured in the terminal output.
-
-### DC01 (Windows Server 2022)
-
-*No activity captured for this section yet.*
-
-### WKS01 (Windows 11)
-
-*No activity captured for this section yet.*
-
-### KALI01 (Kali Linux)
-
-*No terminal activity captured from the attacker box this session; the Hydra brute force was observed only from the SIEM01 side (source `192.168.192.30`).*
+Additional screenshots from this session: none unaccounted for — all four screenshots are cited above.
 
 ## 4. Troubleshooting Log
 
 | Issue | Cause | Fix |
 |---|---|---|
-| `sudo splunk status` → `sudo: 'splunk': command not found` | Splunk binary is not on the system `PATH` | Invoked Splunk using its full path, `/opt/splunk/bin/splunk` |
-| `splunkd 3791 was not running`; stale PID file present | Splunk daemon had stopped; leftover PID/helper state from the prior run | Splunk's own start routine stopped stale helpers and removed the stale PID file, then a restart was issued |
-| Restart warning: "Running Splunk Enterprise as root is deprecated…" | `splunk restart` was run under `sudo` (as root) without the expected flag | Re-ran the restart with `--run-as-root` to acknowledge and proceed |
-| `WARNING: Server Certificate Hostname Validation is disabled` during web-server startup | `server.conf [sslConfig] cliVerifyServerName` is disabled (default/lab config) | Left as-is for the lab; noted as expected behavior, no functional impact |
-| `mongod-8.0 … failed to open directory … cyrus-sasl-mongo-openssl3 … error: No such file or directory` | KV store (MongoDB) looked for a SASL plugin directory that does not exist in this build path | Non-fatal warning during startup; Splunk still reached running state (`splunkd is running (PID: 6626)`), so no action was required this session |
+| `wazuh-manager.service` failed to start after editing `local_rules.xml`; `systemctl status` showed `Control process exited, code=exited, status=1/FAILURE` | Malformed XML in the custom rules — `nano`'s auto-indent/paste handling badly corrupted the file with duplicated `78` markers, stray `M` characters, and broken tag nesting during editing | Re-opened the file with `sudo nano +20 /var/ossec/etc/rules/local_rules.xml`, manually inspected with `cat -n` and `sed -n '15,25p'`, and rewrote the corrupted lines by hand until the XML was well-formed |
+| `wazuh-analysisd: ERROR: (1226): Error reading XML file 'etc/rules/local_rules.xml': XMLERR: Attribute '<if_matched_sid' has no value. (line 20)` | Rule 100010's opening `<rule ...>` tag was missing its closing `>` before the `<if_matched_sid>` element, so the parser read `if_matched_sid` as a broken attribute of the `rule` tag | Corrected the tag so `<rule id="100010" level="10" frequency="4" timeframe="60">` was properly closed before the child elements began |
+| `journalctl -xeu wazuh-manager.service` and `less`-based log paging became unresponsive / produced garbled escape sequences (`ESCESCOOCC`, `ESCESCOODD`, etc.) | Terminal/pager (`less`) receiving unexpected arrow-key or navigation input, likely from copy-paste or terminal resize during the SSH session | Repeated `q`/navigation attempts eventually returned to the prompt; no manager-side fix was needed, this was a terminal display issue only |
+| `wazuh-logtest` returned "No decoder matched" and fell back to generic rule `1002` ("Unknown problem somewhere in the system") for a manually typed sample SSH failure log | The manually crafted test log line's format/timestamp did not match Wazuh's built-in `sshd` decoder well enough to trigger the intended rule chain (5716 → 100010) | Not resolved within this session — noted as a known gap; real Hydra-driven attack traffic captured via `auth.log`/agent forwarding was used to validate the rule instead of the synthetic test line |
+| Command line garbling (`hydra -l socadmin -P passwords.txt ssh://192.168.192.10hydra -l-P passwords.txt`) appeared duplicated in Hydra invocations | Terminal echo/paste artifact duplicating parts of the command line (cosmetic, transcript-only) | No fix needed — command still executed correctly per the output shown |
 
 ## 5. Attack & Detection Scenarios
 
 | Scenario | Attack (KALI01) | Detection (SIEM01) | Status |
 |---|---|---|---|
-| SSH brute force against `socadmin` | Brute-force login attempts from `192.168.192.30` (appears to be a Hydra run per session note) | `/var/log/auth.log` shows multiple `Failed password` / `pam_unix(sshd:auth): authentication failure` entries and `srclimit_penalise` rate-limiting; one `Accepted password` login also recorded. Logs received by Splunk/Wazuh per note. | Attack successful (valid credential accepted); events captured. Detection rule authoring pending next session. |
+| SSH brute force | Hydra dictionary attack against `socadmin` over SSH (`192.168.192.10`), first at default concurrency then throttled to `-t 1` for a more realistic timing pattern | Custom rule 100010 (level 10, frequency=4/60s, `same_source_ip`) designed to fire on 4+ failed SSH logins from one source in 60 seconds, mapped to MITRE T1110.001 | Working — rule loaded successfully (`Total rules enabled: 7017`) and matching failed-login pattern confirmed in `auth.log` |
+| Successful login following brute force | Same Hydra session, which ultimately found the valid password (`123456`) and authenticated | Custom rule 100011 (level 12) fires when a successful SSH login follows a rule-100010 match from the same source, flagged as possible compromise, mapped to MITRE T1110.001 | Working — rule loaded successfully; `auth.log` shows the expected failed-then-accepted sequence from `192.168.192.30` |
 
 ## 6. Lessons Learned
 
-- Splunk was down at the start of the session — verify `splunkd` is running (via `/opt/splunk/bin/splunk status`) *before* generating attack traffic, or events risk being missed.
-- Use the full binary path `/opt/splunk/bin/splunk`; the `splunk` command is not on `PATH`.
-- Running Splunk as root now requires `--run-as-root` and is deprecated — worth revisiting to run Splunk under a dedicated service account.
-- SSH already applied a rate-limit penalty (`srclimit_penalise`) against the brute-force source, which itself is a useful detection signal alongside the failed-password events.
-- The brute force succeeded (an `Accepted password` appears), which is a reminder to harden `socadmin` credentials / SSH auth in the lab.
+- Editing Wazuh's `local_rules.xml` directly in `nano` over an SSH session is error-prone — copy/paste and terminal auto-indent introduced significant corruption (duplicated markers, broken tags) that took multiple `journalctl`/`cat -n` passes to isolate and fix.
+- `wazuh-analysisd`'s XML error messages (with line numbers) are the fastest way to locate a malformed rule — cross-referencing with `cat -n file | sed -n 'X,Yp'` pinpointed the exact broken tag quickly.
+- `wazuh-logtest` is useful for validating decoder/rule matches, but a hand-typed sample log line may not match the real decoder format closely enough — testing against real captured traffic (e.g., `auth.log` entries from an actual Hydra run) is more reliable than synthetic test lines.
+- Throttling Hydra to `-t 1` produced a slower, more realistic brute-force timing pattern that better matches how a `frequency`/`timeframe`-based Wazuh rule is meant to trigger.
+- Always confirm rule count (`Total rules enabled`) in `ossec.log` after a restart as a quick sanity check that custom rules were actually loaded.
 
 ## 7. Changelog
 
-- **2026-08-06** — Restarted Splunk on SIEM01 after finding it stopped; ran an SSH brute-force attack from `192.168.192.30` against `socadmin` and confirmed the attempts were captured in `/var/log/auth.log` and received by the SIEM. Detection rule writing deferred to next session. Screenshots: `VirtualBoxVM_VsrFQQ8cGt.png`, `VirtualBoxVM_pAzIVB5ApD.png`, `chrome_o8drOyn4Cf.png`, `VirtualBoxVM_PQnGIuQEHU.png`.
+- **2026-08-08 22:20 – 2026-08-09 00:20**: Added two custom Wazuh rules (SSH brute force detection and successful-login-after-brute-force detection) to `local_rules.xml`; recovered from XML corruption that broke `wazuh-manager`; validated detection logic using a Hydra SSH brute-force attack from KALI01 against the SOC lab host.

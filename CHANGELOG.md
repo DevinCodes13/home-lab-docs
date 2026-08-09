@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-08-09 — Documented session "Adding Custom Rules to Wazuh" (3 transcripts, 4 screenshots, 2 notes)
 - 2026-08-07 — Documented session "Simulating Attacks and Wazuh Filtering" (2 transcripts, 4 screenshots, 1 notes)
 - 2026-08-07 — Documented session "Windows VM Capture Agent Setup" (3 transcripts, 0 screenshots, 0 notes)
 - 2026-08-07 — Documented session "Simulating Attacks and Wazuh Filtering" (2 transcripts, 4 screenshots, 1 notes)
