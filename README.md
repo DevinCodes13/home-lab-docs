@@ -1,73 +1,60 @@
-# SOC Lab — Rule Adding and Conditions Session
+# Home SOC Lab
 
-> Built and documented in an isolated home lab environment that I own.
-> Documentation generated with LabScribe and reviewed by hand.
+A self-directed home lab for practicing SOC analyst and detection-engineering skills end-to-end: build a monitored Active Directory + SIEM environment, simulate attacks, write and tune detections, and document the whole process.
 
-## 1. Overview
+## Overview
 
-This session focused on SIEM01 (`soc-lab-ubuntu`), the Ubuntu/Splunk/Wazuh log collection host. Work centered on routine system maintenance — refreshing package lists and installing build tooling (`build-essential`, `dkms`, matching kernel headers) likely in preparation for building VirtualBox Guest Additions kernel modules — followed by mounting and browsing the VirtualBox Guest Additions CD image. The shell history also contains fragments referencing earlier or planned work on Wazuh custom detection rules (`local_rules.xml`) and a Splunk forwarder listener on port 9997, though these were not confirmed as executed within this session's captured output.
+Built in VirtualBox on an isolated host-only + NAT network. The lab centers on a Wazuh manager (with Splunk also running on the same host) collecting logs from a domain controller and a Windows workstation, with a Kali box used to generate real attack traffic to validate detections against.
+
+Documentation is generated session-by-session with LabScribe — a Claude-powered desktop tool built specifically for this project — from real captured terminal transcripts, screenshots, and notes. `README.md` (this file) is a hand-maintained overview of the whole project; the full per-session write-ups (build steps, troubleshooting logs, exact commands and errors) live in [`docs/`](./docs), and [`CHANGELOG.md`](./CHANGELOG.md) is the append-only session log.
+
+## Environment
 
 | Host | OS | Role | IP |
 |---|---|---|---|
-| DC01 | Windows Server 2022 | Domain Controller + DNS | 10.10.10.10 |
-| WKS01 | Windows 11 | Domain-joined workstation | 10.10.10.20 |
-| SIEM01 | Ubuntu + Splunk | SIEM / log collector | 10.10.10.30 |
-| KALI01 | Kali Linux | Attacker box | 10.10.10.40 |
+| DC01 | Windows Server 2022 | Domain Controller + DNS | `10.10.10.10` |
+| WKS01 | Windows 11 | Domain-joined workstation, Splunk Universal Forwarder + Sysmon | `10.10.10.20` |
+| SIEM01 (`soc-lab-ubuntu`) | Ubuntu | Wazuh manager + Splunk | `10.10.10.30` |
+| KALI01 | Kali Linux | Attacker box | `10.10.10.40` |
 
-## 2. Network Diagram
+Note: several sessions' captured transcripts show activity on a `192.168.192.0/24` host-only segment rather than the `10.10.10.0/24` addressing above — this reflects real network changes made over the course of the project (see individual session docs for exact IPs observed at the time).
 
-```mermaid
-graph TB
-    subgraph LAB["Isolated Lab Network - 10.10.10.0/24"]
-        DC["DC01<br/>Windows Server 2022<br/>Domain Controller + DNS<br/>10.10.10.10"]
-        WKS["WKS01<br/>Windows 11<br/>Domain-joined workstation<br/>10.10.10.20"]
-        SIEM["SIEM01<br/>Ubuntu + Splunk<br/>SIEM / log collector<br/>10.10.10.30"]
-        KALI["KALI01<br/>Kali Linux<br/>Attacker<br/>10.10.10.40"]
-        WKS -->|"authenticates / DNS"| DC
-        DC -->|"forwards logs"| SIEM
-        WKS -->|"forwards logs"| SIEM
-        KALI -.->|"attacks"| DC
-        KALI -.->|"attacks"| WKS
-    end
-```
+## Timeline
 
-## 3. Build Steps
-
-### SIEM01 (soc-lab-ubuntu)
-
-- Ran `sudo apt update` to refresh the package index ahead of installing new tooling. The command as typed in the transcript appears garbled (`sudo nanoapt update`), but the subsequent output matches a normal `apt update` run against the Wazuh, Ubuntu archive, and security repos, indicating the update proceeded correctly. Result: 35 packages flagged as upgradable.
-- Attempted to install `build-essential`, `dkms`, and the running kernel's `linux-headers` package — this toolchain is typically needed to compile kernel modules, most likely for installing VirtualBox Guest Additions on the SIEM VM. This matters because Guest Additions improve clipboard/shared-folder/display integration for a VM used heavily for day-to-day SIEM administration.
-- First install attempt failed due to a missing hyphen in the package name (`build essential` instead of `build-essential`); corrected and re-run successfully. `build-essential` and the matching `linux-headers` package were already present and were marked manually installed; `dkms` was newly installed.
-- Post-install trigger processing automatically restarted `wazuh-indexer.service` as part of the system's outdated-service scan (via `needrestart`), confirming a wazuh-indexer component is running on this host.
-- Located and mounted the VirtualBox Guest Additions CD image: an initial `cd /media/cdrom` failed because the mount point didn't exist yet; the disk was identified via `lsblk` as `sr0` (51M ROM device), then mounted with `sudo mount /dev/cdrom /media/cdrom` (read-only, as expected for optical media).
-- Browsed the mounted ISO contents, confirming it is the standard VirtualBox Guest Additions distribution (`VBoxLinuxAdditions.run`, `VBoxWindowsAdditions*.exe`, `windows11-bypass.reg`, `autorun.sh`, etc.). No install script was executed within this session's captured transcript.
-- The shell history buffer also shows fragments referencing `/var/ossec/etc/rules/local_rules.xml` (Wazuh custom rules file), `wazuh-manager`/`wazuh-dashboard` service status/restarts, and Splunk listener setup (`/opt/splunk/bin/splunk enable listen 9997`) — these appear to be from earlier sessions bleeding into the recorded history and are not confirmed as run during this capture.
-- No screenshots were provided for this session.
-
-### DC01 / WKS01 / KALI01
-
-*No activity captured for this section yet.*
-
-## 4. Troubleshooting Log
-
-| Issue | Cause | Fix |
+| Date | Session | Summary |
 |---|---|---|
-| `sudo apt install -y build essential dkms linux-headers-$(uname -r)` failed with `Error: Unable to locate package build` / `Error: Unable to locate package essential` | Package name typo — missing hyphen split `build-essential` into two invalid package names | Re-ran the command with the correct hyphenated name `build-essential`; install succeeded |
-| `cd /media/cdrom` failed with `No such file or directory` | The CD-ROM device (`sr0`) had not yet been mounted, so the mount point path had nothing to change into | Verified the optical device with `lsblk`, then ran `sudo mount /dev/cdrom /media/cdrom` to mount it |
-| `ls /media/$USER/` returned `cannot access '/media/socadmin/': No such file or directory` | No removable media was auto-mounted under the per-user media directory | Fell back to manually mounting `/dev/cdrom` to `/media/cdrom` instead of relying on auto-mount |
-| `mount` reported `WARNING: source write-protected, mounted read-only` | Expected behavior — the source is a read-only ISO (VirtualBox Guest Additions CD) | No fix needed; informational only, browsing proceeded normally |
-| Shell history shows a garbled, concatenated block of unrelated commands (Wazuh rule edits, Splunk listener setup, service restarts all run together on one line) | Likely a terminal/tty rendering or history-scrollback artifact rather than commands actually executed in sequence during this session | No fix applied; flagged here so it isn't mistaken for verified session activity |
+| 2026-08-02 | [Ubuntu Setup — Disk, LVM & Wazuh Install](./docs/2026-08-02-ubuntu-setup-disk-lvm-wazuh-install.md) | Initial SIEM01 build: disk partitioning, LVM, and first Wazuh all-in-one install. |
+| 2026-08-05 | [Splunk Installation & HTTPS Setup](./docs/2026-08-05-splunk-installation-https-setup.md) | Brought SIEM01 online as a Wazuh manager, enrolled the Windows 11 host as an agent, and began Splunk install/HTTPS setup. |
+| 2026-08-05 | [Windows VM Capture Agent Setup](./docs/2026-08-05-windows-vm-capture-agent-setup.md) | Installed and configured the Splunk Universal Forwarder on WKS01 to forward Security/System/Sysmon logs to the SIEM. |
+| 2026-08-06 | [Kali Capture Agent — Initial Setup](./docs/2026-08-06-kali-capture-agent-initial-setup.md) | Configured LabScribe's auto-capture agent on KALI01 so future attack sessions are recorded automatically. |
+| 2026-08-06 | Simulating Attacks and Detection | *No transcript captured for this session — see [Known Gaps](#known-gaps) below.* |
+| 2026-08-06 | [Simulating Attacks and Wazuh Filtering](./docs/2026-08-06-simulating-attacks-and-wazuh-filtering.md) | First SSH brute-force attack from KALI01 against SIEM01; confirmed the attempts landed in `auth.log`. |
+| 2026-08-06 | [Adding Wazuh Correlation Rules for Brute Force](./docs/2026-08-06-adding-wazuh-correlation-rules-for-brute-force.md) | Began writing a custom Wazuh correlation rule for SSH brute-force detection (`local_rules.xml`). |
+| 2026-08-07 | [Rule Adding and Conditions](./docs/2026-08-07-rule-adding-and-conditions.md) | SIEM01 maintenance and Guest Additions build tooling; follow-on detection-rule work carried into later sessions. |
+| 2026-08-08 | [Adding Custom Rules to Wazuh](./docs/2026-08-08-adding-custom-rules-to-wazuh.md) | Finished the custom SSH brute-force detection rule and validated it against a live Hydra attack; debugged a manager-breaking XML error along the way. |
+| 2026-08-09 | [Port Scan Detection](./docs/2026-08-09-port-scan-detection.md) | Built a UFW-based port scan / brute-force detection pipeline: custom decoder, rules mapped to MITRE T1046, validated with Hydra and repeated Nmap scans. |
 
-## 5. Attack & Detection Scenarios
+For the full commit-by-commit history (including a couple of duplicate re-generations), see [`CHANGELOG.md`](./CHANGELOG.md).
 
-*No activity captured for this section yet.*
+## Detection Engineering
 
-## 6. Lessons Learned
+Custom Wazuh detections written and validated against live attack traffic from KALI01:
 
-- Double-check hyphenation on multi-word package names (`build-essential`) before running `apt install` — a missing hyphen splits it into two nonexistent packages.
-- Confirm a mount point/device is actually mounted (`lsblk`) before `cd`-ing into it; optical media on this VM doesn't appear to auto-mount under `/media/$USER/`.
-- Terminal capture can occasionally merge unrelated history lines into a single garbled block — treat these as recording artifacts, not verified command execution, when writing up session notes.
+- **SSH brute-force detection** — correlation rule against repeated `sshd` auth failures (MITRE T1110.001), plus a follow-on rule for a successful login after a brute-force pattern.
+- **Port scan detection** — custom `ufw-block` decoder plus a frequency-based rule (MITRE T1046) triggered by repeated UFW-blocked connection attempts from the same source.
 
-## 7. Changelog
+Both were validated end-to-end: attack traffic generated from Kali (Hydra for brute-force, Nmap for port scans), and the resulting Wazuh alerts confirmed via `wazuh-logtest` and the dashboard.
 
-- **2026-08-07** — SIEM01 maintenance session: ran `apt update`, installed `build-essential`/`dkms`/kernel headers (likely for VirtualBox Guest Additions), mounted and inspected the Guest Additions ISO. Wazuh-indexer service auto-restarted post-install. No Wazuh rule changes or Splunk listener changes confirmed as executed in this session's captured output.
+## Known Gaps
+
+- **Simulating Attacks and Detection (2026-08-06, 10:52–11:08)** has no documentation. The transcript file LabScribe originally associated with this session had actually stopped being written five minutes *before* the session began — a symptom of a `script` write-buffering bug (fixed later by adding `--flush` to the capture agent). Its real content belongs to the prior "Kali Capture Agent — Initial Setup" session and has been correctly attributed there instead. There is no recoverable transcript for this session.
+- A "Full Report (Word)" link previously in this README pointed at a `.docx` file that doesn't exist anywhere in this repo's history — it's been removed rather than recreated. If a consolidated Word-format report (like the one in [`Vulnerability-Management-Workflow`](https://github.com/DevinCodes13/Vulnerability-Management-Workflow)) is wanted for this project too, that's a separate task.
+
+## Tools Used
+
+| Category | Tools |
+|---|---|
+| SIEM / Detection | Wazuh, Splunk, Sysmon |
+| Attacker Simulation | Kali Linux, Hydra, Nmap |
+| Documentation | LabScribe (Claude-powered auto-documentation from captured terminal sessions) |
+| Hypervisor / Networking | VirtualBox (host-only + NAT) |
