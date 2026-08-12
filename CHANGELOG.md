@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-08-11 — Documented session "Rule Adding and Conditions" (2 transcripts, 0 screenshots, 0 notes)
 - 2026-08-11 — Documented session "Adding Wazuh Correlation Rules for Brute Force" (1 transcripts, 0 screenshots, 0 notes)
 - 2026-08-11 — Documented session "Kali Capture Agent — Initial Setup" (1 transcripts, 0 screenshots, 0 notes)
 - 2026-08-09 — Documented session "Port Scan Detection" (4 transcripts, 8 screenshots, 4 notes)
