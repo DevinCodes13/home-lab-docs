@@ -1,5 +1,6 @@
 # Changelog
 
+- 2026-08-11 — Documented session "Kali Capture Agent — Initial Setup" (1 transcripts, 0 screenshots, 0 notes)
 - 2026-08-09 — Documented session "Port Scan Detection" (4 transcripts, 8 screenshots, 4 notes)
 - 2026-08-09 — Documented session "Adding Custom Rules to Wazuh" (3 transcripts, 4 screenshots, 2 notes)
 - 2026-08-07 — Documented session "Simulating Attacks and Wazuh Filtering" (2 transcripts, 4 screenshots, 1 notes)
