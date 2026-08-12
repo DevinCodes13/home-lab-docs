@@ -1,60 +1,100 @@
-# Home SOC Lab
+# Home SOC Lite Lab
 
-A self-directed home lab for practicing SOC analyst and detection-engineering skills end-to-end: build a monitored Active Directory + SIEM environment, simulate attacks, write and tune detections, and document the whole process.
+A home-built Security Operations Center lab covering log pipeline architecture, custom detection engineering, and end-to-end incident investigation — built and documented from the ground up on Wazuh and Splunk.
+
+**[📄 Full Report (Word)](./SOC_Lite_Lab_Report.docx)**
+
+---
 
 ## Overview
 
-Built in VirtualBox on an isolated host-only + NAT network. The lab centers on a Wazuh manager (with Splunk also running on the same host) collecting logs from a domain controller and a Windows workstation, with a Kali box used to generate real attack traffic to validate detections against.
+Three VMs, two SIEM platforms, one attacker box. The lab simulates a minimal real-world SOC: a central log aggregation/analysis host, a monitored Windows endpoint, and a separate adversarial machine used to generate genuine attack traffic — not synthetic test data.
 
-Documentation is generated session-by-session with LabScribe — a Claude-powered desktop tool built specifically for this project — from real captured terminal transcripts, screenshots, and notes. `README.md` (this file) is a hand-maintained overview of the whole project; the full per-session write-ups (build steps, troubleshooting logs, exact commands and errors) live in [`docs/`](./docs), and [`CHANGELOG.md`](./CHANGELOG.md) is the append-only session log.
-
-## Environment
-
-| Host | OS | Role | IP |
-|---|---|---|---|
-| DC01 | Windows Server 2022 | Domain Controller + DNS | `10.10.10.10` |
-| WKS01 | Windows 11 | Domain-joined workstation, Splunk Universal Forwarder + Sysmon | `10.10.10.20` |
-| SIEM01 (`soc-lab-ubuntu`) | Ubuntu | Wazuh manager + Splunk | `10.10.10.30` |
-| KALI01 | Kali Linux | Attacker box | `10.10.10.40` |
-
-Note: several sessions' captured transcripts show activity on a `192.168.192.0/24` host-only segment rather than the `10.10.10.0/24` addressing above — this reflects real network changes made over the course of the project (see individual session docs for exact IPs observed at the time).
-
-## Timeline
-
-| Date | Session | Summary |
-|---|---|---|
-| 2026-08-02 | [Ubuntu Setup — Disk, LVM & Wazuh Install](./docs/2026-08-02-ubuntu-setup-disk-lvm-wazuh-install.md) | Initial SIEM01 build: disk partitioning, LVM, and first Wazuh all-in-one install. |
-| 2026-08-05 | [Splunk Installation & HTTPS Setup](./docs/2026-08-05-splunk-installation-https-setup.md) | Brought SIEM01 online as a Wazuh manager, enrolled the Windows 11 host as an agent, and began Splunk install/HTTPS setup. |
-| 2026-08-05 | [Windows VM Capture Agent Setup](./docs/2026-08-05-windows-vm-capture-agent-setup.md) | Installed and configured the Splunk Universal Forwarder on WKS01 to forward Security/System/Sysmon logs to the SIEM. |
-| 2026-08-06 | [Kali Capture Agent — Initial Setup](./docs/2026-08-06-kali-capture-agent-initial-setup.md) | Configured LabScribe's auto-capture agent on KALI01 so future attack sessions are recorded automatically. |
-| 2026-08-06 | Simulating Attacks and Detection | *No transcript captured for this session — see [Known Gaps](#known-gaps) below.* |
-| 2026-08-06 | [Simulating Attacks and Wazuh Filtering](./docs/2026-08-06-simulating-attacks-and-wazuh-filtering.md) | First SSH brute-force attack from KALI01 against SIEM01; confirmed the attempts landed in `auth.log`. |
-| 2026-08-06 | [Adding Wazuh Correlation Rules for Brute Force](./docs/2026-08-06-adding-wazuh-correlation-rules-for-brute-force.md) | Began writing a custom Wazuh correlation rule for SSH brute-force detection (`local_rules.xml`). |
-| 2026-08-07 | [Rule Adding and Conditions](./docs/2026-08-07-rule-adding-and-conditions.md) | SIEM01 maintenance and Guest Additions build tooling; follow-on detection-rule work carried into later sessions. |
-| 2026-08-08 | [Adding Custom Rules to Wazuh](./docs/2026-08-08-adding-custom-rules-to-wazuh.md) | Finished the custom SSH brute-force detection rule and validated it against a live Hydra attack; debugged a manager-breaking XML error along the way. |
-| 2026-08-09 | [Port Scan Detection](./docs/2026-08-09-port-scan-detection.md) | Built a UFW-based port scan / brute-force detection pipeline: custom decoder, rules mapped to MITRE T1046, validated with Hydra and repeated Nmap scans. |
-
-For the full commit-by-commit history (including a couple of duplicate re-generations), see [`CHANGELOG.md`](./CHANGELOG.md).
-
-## Detection Engineering
-
-Custom Wazuh detections written and validated against live attack traffic from KALI01:
-
-- **SSH brute-force detection** — correlation rule against repeated `sshd` auth failures (MITRE T1110.001), plus a follow-on rule for a successful login after a brute-force pattern.
-- **Port scan detection** — custom `ufw-block` decoder plus a frequency-based rule (MITRE T1046) triggered by repeated UFW-blocked connection attempts from the same source.
-
-Both were validated end-to-end: attack traffic generated from Kali (Hydra for brute-force, Nmap for port scans), and the resulting Wazuh alerts confirmed via `wazuh-logtest` and the dashboard.
-
-## Known Gaps
-
-- **Simulating Attacks and Detection (2026-08-06, 10:52–11:08)** has no documentation. The transcript file LabScribe originally associated with this session had actually stopped being written five minutes *before* the session began — a symptom of a `script` write-buffering bug (fixed later by adding `--flush` to the capture agent). Its real content belongs to the prior "Kali Capture Agent — Initial Setup" session and has been correctly attributed there instead. There is no recoverable transcript for this session.
-- A "Full Report (Word)" link previously in this README pointed at a `.docx` file that doesn't exist anywhere in this repo's history — it's been removed rather than recreated. If a consolidated Word-format report (like the one in [`Vulnerability-Management-Workflow`](https://github.com/DevinCodes13/Vulnerability-Management-Workflow)) is wanted for this project too, that's a separate task.
-
-## Tools Used
-
-| Category | Tools |
+| | |
 |---|---|
-| SIEM / Detection | Wazuh, Splunk, Sysmon |
-| Attacker Simulation | Kali Linux, Hydra, Nmap |
-| Documentation | LabScribe (Claude-powered auto-documentation from captured terminal sessions) |
-| Hypervisor / Networking | VirtualBox (host-only + NAT) |
+| **Detections built** | 3 custom Wazuh rules, tested against live attack traffic |
+| **Attack sources** | SSH brute force (Hydra), full-port SYN scan (Nmap) |
+| **SIEM platforms** | Wazuh (Manager + Dashboard) and Splunk Enterprise, run in parallel for cross-validation |
+| **MITRE ATT&CK coverage** | T1110.001 (Password Guessing), T1046 (Network Service Discovery) |
+
+## Architecture
+
+![Architecture diagram](./architecture.png)
+
+| Component | Details |
+|---|---|
+| **SIEM Host** (`soc-lab-ubuntu`) | Ubuntu Server · `192.168.192.10` — Wazuh Manager + Dashboard, Splunk Enterprise |
+| **Monitored Endpoint** (`WindowsBox`) | Windows 11 · `192.168.192.20` — Wazuh Agent, Sysmon (SwiftOnSecurity config), Splunk Universal Forwarder |
+| **Attacker Machine** (`Kali`) | Kali Linux · `192.168.192.30` — Hydra, Nmap |
+| **Network** | VirtualBox host-only adapter (`192.168.192.0/24`) for lab traffic; independent NAT adapter per VM for internet access |
+
+## Detections
+
+| Rule ID(s) | Detection | MITRE ATT&CK | Logic |
+|---|---|---|---|
+| `100010` | SSH brute force | T1110.001 | 4+ failed SSH logins from the same source IP within 60 seconds |
+| `100011` | Successful login following brute force (possible compromise) | T1110.001 | Successful SSH login from a source IP that just triggered `100010` |
+| `100012` / `100013` | Port scan (firewall block correlation) | T1046 | `100013` escalates when 10+ UFW-blocked connection attempts occur from the same source within 30 seconds |
+
+Full rule XML, decoder logic, and the reasoning behind each threshold are in the [report](./SOC_Lite_Lab_Report.docx) and in [`local_rules.xml`](./local_rules.xml) / [`local_decoder.xml`](./local_decoder.xml).
+
+## What's in this repo
+
+```
+├── SOC_Lite_Lab_Report.docx   # Full write-up: architecture, detections, investigations, lessons learned
+├── local_rules.xml            # Custom Wazuh detection rules (100010–100013)
+├── local_decoder.xml          # Custom Wazuh decoder for parsing UFW firewall logs
+├── architecture.png           # Network topology diagram
+├── docs/                      # Per-session build logs generated from raw terminal
+│                               captures — the primary-source detail behind the report
+├── CHANGELOG.md               # Append-only log of every documented session
+└── README.md
+```
+
+## Highlights from the build
+
+- Designed and tuned two multi-stage correlation rules from scratch, including an escalation rule that only fires when a brute-force pattern is immediately followed by a successful login — a stronger, lower-noise signal than either condition alone.
+- Diagnosed and fixed a Windows Event Log permissions issue (Sysmon's "Operational" channel enforces a stricter ACL than legacy Security/System channels) — and confirmed the same root cause independently on both Wazuh and Splunk.
+- Built a custom Wazuh decoder to parse UFW firewall logs, which aren't understood by Wazuh's ruleset out of the box, to enable port-scan detection.
+- Debugged real Wazuh rule-frequency semantics (`frequency="N"` means N matches *beyond* the first, not N total) and event-ordering dependencies in correlation rules.
+
+Full narrative, screenshots, and terminal evidence for all of the above are in the report.
+
+## Limitations & Next Steps
+
+This is a lab-scale environment, not a hardened production deployment — detection thresholds were tuned against a single attacker on an isolated /24, all three detections are alert-only (no automated response), and coverage is currently limited to authentication abuse and network reconnaissance. Planned next steps include DNS-based threat detection, active-response auto-blocking, and expanding the attack chain with tools like Metasploit. See the report's *Limitations & Future Work* section for the full list.
+
+## Tools
+
+Oracle VirtualBox · Wazuh · Splunk Enterprise + Universal Forwarder · Sysmon (SwiftOnSecurity config) · Hydra · Nmap · UFW
+
+## Troubleshooting Log
+
+A sample of the real configuration errors hit and resolved while building the detections — kept here because the fixes are non-obvious and worth documenting for anyone hitting the same issues.
+
+| Issue | Cause | Fix |
+|---|---|---|
+| `wazuh-manager.service` failed to start; `wazuh-analysisd: CRITICAL: Error loading the rules` | Custom rule `100010` in `local_rules.xml` was missing a closing `>` on the opening `<rule ...>` tag, breaking the XML | Corrected the malformed `<rule>` tag and restarted `wazuh-manager` |
+| `wazuh-logtest` matched raw SSH failure log lines only to the generic rule 1002 ("Unknown problem") | The custom brute-force rule referenced a base SID that wasn't yet correctly wired to the decoded event | Resolved once the correlation rule was pointed at the correct base rule (5760) and validated via `wazuh-logtest` |
+| `tail: cannot open '/var/log/ufw.log'` (repeated) | UFW logging was enabled but no traffic had yet been blocked, and/or rsyslog wasn't routing kernel UFW messages to that file yet | Restarted the `rsyslog` service and generated blocked traffic from Kali (Nmap/Hydra), after which `/var/log/ufw.log` was created and populated |
+| `wazuh-logcollector: ERROR: Could not open file '/var/log/ufw.log'` | Wazuh's `ossec.conf` `<localfile>` block pointed at `/var/log/ufw.log` before the file existed | Resolved once UFW actually began logging block events to that path |
+| `wazuh-analysisd: ERROR: Syntax error on regex: '\[UFW BLOCK\]'` | The `prematch` regex used escaped brackets, which Wazuh's regex engine rejected | Simplified `prematch` to the plain string `UFW BLOCK` with no escaped brackets |
+| `wazuh-analysisd: ERROR: Parent decoder name invalid: 'ufw-block'` | The `ufw-block` decoder was defined with `<program_name>kernel</program_name>` instead of `<parent>kernel</parent>`, so it wasn't recognized as a valid parent for child decoders | Changed the decoder to use `<parent>kernel</parent>` and added `<use_own_name>yes</use_own_name>` |
+| Legitimate lab traffic (agent/manager comms) dropped after tightening UFW | Narrowing the broad "allow from subnet" rule to `allow ... to any port 22` also blocked port 443 traffic the Wazuh dashboard needed | Added an explicit `ufw allow from 192.168.192.0/24 to any port 443` rule after observing the blocked traffic in `ufw.log` |
+
+## Lessons Learned
+
+- Malformed custom Wazuh XML (rules or decoders) causes `wazuh-manager` to fail to start entirely — check `ossec.log` / `journalctl -xeu wazuh-manager` immediately after any edit, not just systemd's generic failure message.
+- Decoder `<parent>` chains in Wazuh must reference a decoder that itself declares `<parent>` correctly, plus `<use_own_name>yes</use_own_name>` if child decoders need to attach to it — using `<program_name>` instead of `<parent>` on the base decoder silently breaks child-decoder inheritance.
+- UFW log entries don't appear in `/var/log/ufw.log` until rsyslog is actively routing kernel `[UFW BLOCK]` messages *and* at least one packet has actually been blocked — an empty/missing log file is expected before both conditions are met.
+- Broadening a firewall allow-rule to fix one problem can be too permissive from a security-monitoring standpoint; narrowing rules to specific ports is safer but requires verifying every legitimate traffic path first.
+- Iterative validation with `wazuh-logtest` against real captured log lines was essential for confirming decoder/rule fixes without needing to regenerate attack traffic every time.
+
+## Documentation Note
+
+Terminal sessions across all three VMs were captured with LabScribe throughout the build. This README and the full report were written from those transcripts plus direct review of the Wazuh/Splunk dashboards, then checked by hand against the actual configuration files for accuracy.
+
+## Contact
+
+**Devin**
+[LinkedIn](https://www.linkedin.com/in/devin-phillips-b35700269/) · [GitHub](https://github.com/DevinCodes13) · 144kfilms@gmail.com

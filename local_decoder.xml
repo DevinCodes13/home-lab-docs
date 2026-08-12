@@ -1,0 +1,26 @@
+<!-- Local decoders -->
+<!-- Home SOC Lite Lab — custom decoders -->
+<!-- Wazuh manager: /var/ossec/etc/decoders/local_decoder.xml -->
+
+<!--
+  Decoder: UFW firewall block events
+  Ubuntu's UFW does not have a dedicated decoder in Wazuh's default
+  ruleset. This decoder chains under Wazuh's built-in "kernel" decoder
+  (since UFW's blocked-connection log lines are emitted via the kernel
+  netfilter module) and extracts source IP / destination IP for use in
+  correlation rules.
+
+  Note: in this lab, decoder-name resolution for <decoded_as> in rules
+  proved unreliable after chaining under "kernel" — rule 100012 in
+  local_rules.xml ended up matching directly on the raw log text via
+  <match>UFW BLOCK</match> instead, which was more robust. This decoder
+  is kept here as a reference / for the srcip and dstip field extraction
+  it does provide via wazuh-logtest.
+-->
+<decoder name="ufw-block">
+  <parent>kernel</parent>
+  <prematch>UFW BLOCK</prematch>
+  <use_own_name>yes</use_own_name>
+  <regex offset="after_prematch">SRC=(\S+) DST=(\S+)</regex>
+  <order>srcip, dstip</order>
+</decoder>
